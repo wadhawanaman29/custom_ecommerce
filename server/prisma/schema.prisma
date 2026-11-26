@@ -3,7 +3,8 @@
 // so existing frontend URLs and references keep working.
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextIndex"]
 }
 
 datasource db {
@@ -46,7 +47,10 @@ model User {
   posts    Post[]
   media    Media[]
 
-  @@index([role])
+  @@index([role, createdAt])
+  @@index([displayName])
+  @@index([createdAt])
+  @@fulltext([email, login, firstName, lastName, displayName])
 }
 
 model ApiKey {
@@ -87,6 +91,7 @@ model Media {
   categoryImages ProductCategory[]
 
   @@index([mimeType])
+  @@index([createdAt])
 }
 
 // ───────────────────────────── Catalog ─────────────────────────────
@@ -173,6 +178,8 @@ model Product {
   @@index([stockStatus])
   @@index([totalSales])
   @@index([createdAt])
+  @@index([salePrice])
+  @@fulltext([name, sku])
 }
 
 model ProductImage {
@@ -262,6 +269,7 @@ model ProductReview {
   createdAt     DateTime @default(now())
 
   @@index([productId, status])
+  @@index([status, createdAt])
 }
 
 model ShippingClass {
@@ -301,6 +309,10 @@ model Order {
   customerNote       String    @default("") @db.Text
   billing            Json
   shipping           Json
+  // Copies of billing fields as indexed columns (searching inside JSON scans every row)
+  billingEmail       String    @default("") @db.VarChar(191)
+  billingName        String    @default("") @db.VarChar(255)
+  billingPhone       String    @default("") @db.VarChar(50)
 
   paymentMethod      String    @default("") @db.VarChar(100)
   paymentMethodTitle String    @default("") @db.VarChar(200)
@@ -316,11 +328,18 @@ model Order {
   items              OrderItem[]
   notes              OrderNote[]
   refunds            OrderRefund[]
+  stats              OrderStats?
+  productLookups     OrderProductLookup[]
+  couponLookups      OrderCouponLookup[]
 
-  @@index([status])
-  @@index([customerId])
+  @@index([status, createdAt])
+  @@index([customerId, createdAt])
   @@index([createdAt])
+  @@index([updatedAt])
   @@index([orderKey])
+  @@index([billingEmail])
+  @@index([billingPhone])
+  @@fulltext([billingName, billingEmail, billingPhone])
 }
 
 // One table for all order item types, like wp_woocommerce_order_items
@@ -363,6 +382,8 @@ model OrderItem {
 
   @@index([orderId, type])
   @@index([productId])
+  @@index([variationId])
+  @@index([type, code])
 }
 
 model OrderNote {
@@ -389,6 +410,62 @@ model OrderRefund {
   createdAt  DateTime @default(now())
 
   @@index([orderId])
+  @@index([createdAt])
+}
+
+// ───────────────────────────── Analytics lookup tables ─────────────────────────────
+// Narrow, indexed copies of order data (like wc_order_stats / wc_order_product_lookup /
+// wc_order_coupon_lookup). Kept in sync on every order change; reports never scan orders.
+
+model OrderStats {
+  orderId           Int      @id
+  order             Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status            String   @db.VarChar(30)
+  createdAt         DateTime
+  customerId        Int?
+  numItemsSold      Int      @default(0)
+  netTotal          Decimal  @default(0) @db.Decimal(19, 4) // total − tax − shipping
+  discountTotal     Decimal  @default(0) @db.Decimal(19, 4)
+  taxTotal          Decimal  @default(0) @db.Decimal(19, 4)
+  shippingTotal     Decimal  @default(0) @db.Decimal(19, 4)
+  total             Decimal  @default(0) @db.Decimal(19, 4)
+  returningCustomer Boolean  @default(false)
+
+  @@index([status, createdAt])
+  @@index([createdAt])
+  @@index([customerId])
+}
+
+model OrderProductLookup {
+  orderItemId  Int      @id
+  orderId      Int
+  order        Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId    Int
+  variationId  Int      @default(0)
+  customerId   Int?
+  status       String   @db.VarChar(30)
+  createdAt    DateTime
+  quantity     Int      @default(0)
+  netRevenue   Decimal  @default(0) @db.Decimal(19, 4)
+  couponAmount Decimal  @default(0) @db.Decimal(19, 4)
+
+  @@index([createdAt, status])
+  @@index([productId, createdAt])
+  @@index([variationId, createdAt])
+  @@index([orderId])
+}
+
+model OrderCouponLookup {
+  orderId   Int
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  code      String   @db.VarChar(100)
+  status    String   @db.VarChar(30)
+  createdAt DateTime
+  discount  Decimal  @default(0) @db.Decimal(19, 4)
+
+  @@id([orderId, code])
+  @@index([createdAt, status])
+  @@index([code, createdAt])
 }
 
 // ───────────────────────────── Coupons ─────────────────────────────
@@ -415,10 +492,24 @@ model Coupon {
   minimumAmount             Decimal?  @db.Decimal(19, 4)
   maximumAmount             Decimal?  @db.Decimal(19, 4)
   emailRestrictions         Json?
-  usedBy                    Json?     // [userId or email, ...]
+  usedBy                    Json?     // legacy, no longer written — see CouponUsage
   meta                      Json?
   createdAt                 DateTime  @default(now())
   updatedAt                 DateTime  @updatedAt
+  usages                    CouponUsage[]
+}
+
+// One row per coupon use (WooCommerce "_used_by"); per-user limits count rows via the index
+model CouponUsage {
+  id        Int      @id @default(autoincrement())
+  couponId  Int
+  coupon    Coupon   @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  usedBy    String   @db.VarChar(191) // customer ID or billing email (lowercase)
+  orderId   Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([couponId, usedBy])
+  @@index([orderId])
 }
 
 // ───────────────────────────── Tax ─────────────────────────────
@@ -516,8 +607,10 @@ model Post {
   terms         Term[]    @relation("PostToTerm")
 
   @@index([type, status, createdAt])
+  @@index([type, menuOrder])
   @@index([slug])
   @@index([parentId])
+  @@fulltext([title, content])
 }
 
 model Term {
@@ -546,6 +639,7 @@ model Comment {
   createdAt   DateTime @default(now())
 
   @@index([postId, status])
+  @@index([status, createdAt])
 }
 
 model Menu {

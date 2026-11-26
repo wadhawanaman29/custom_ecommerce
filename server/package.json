@@ -14,7 +14,8 @@
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
     "seed": "node scripts/seed.js",
-    "migrate:wp": "node scripts/migrate-woocommerce.js"
+    "migrate:wp": "node scripts/migrate-woocommerce.js",
+    "stats:rebuild": "node scripts/rebuild-stats.js"
   },
   "dependencies": {
     "@prisma/client": "5.22.0",

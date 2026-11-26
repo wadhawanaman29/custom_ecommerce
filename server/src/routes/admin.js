@@ -21,16 +21,17 @@ router.get('/stats', can('view_woocommerce_reports'), ah(async (req, res) => {
   const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
 
   const [byStatus, revenue, today, products, lowStock, outOfStock, customers, recent, daily, top, pendingReviews] = await Promise.all([
-    prisma.order.groupBy({ by: ['status'], _count: { _all: true } }),
-    prisma.order.aggregate({ where: { status: paid, createdAt: { gte: since } }, _sum: { total: true }, _count: { _all: true } }),
-    prisma.order.aggregate({ where: { status: paid, createdAt: { gte: startOfToday } }, _sum: { total: true }, _count: { _all: true } }),
+    // Status counts: cached 30 s (index-only count per status)
+    require('../lib/cache').cachedCount('order-status-counts', () => prisma.orderStats.groupBy({ by: ['status'], _count: { _all: true } })),
+    prisma.orderStats.aggregate({ where: { status: paid, createdAt: { gte: since } }, _sum: { total: true }, _count: { _all: true } }),
+    prisma.orderStats.aggregate({ where: { status: paid, createdAt: { gte: startOfToday } }, _sum: { total: true }, _count: { _all: true } }),
     prisma.product.count({ where: { type: { not: 'variation' }, status: { not: 'trash' } } }),
     prisma.product.findMany({ where: { manageStock: true, stockQuantity: { gt: 0, lte: 5 }, status: 'publish' }, select: { id: true, name: true, stockQuantity: true, parentId: true }, take: 10, orderBy: { stockQuantity: 'asc' } }),
     prisma.product.count({ where: { stockStatus: 'outofstock', status: 'publish', type: { not: 'variation' } } }),
     prisma.user.count({ where: { role: 'customer' } }),
-    prisma.order.findMany({ where: { status: { not: 'trash' } }, orderBy: { createdAt: 'desc' }, take: 8, select: { id: true, number: true, status: true, total: true, currency: true, billing: true, createdAt: true } }),
-    prisma.$queryRaw`SELECT DATE(createdAt) AS d, COUNT(*) AS orders, SUM(total) AS sales FROM \`Order\` WHERE status IN ('processing','completed','on-hold') AND createdAt >= ${since} GROUP BY DATE(createdAt) ORDER BY d`,
-    prisma.orderItem.groupBy({ by: ['productId', 'name'], where: { type: 'line_item', productId: { not: null }, order: { status: paid, createdAt: { gte: since } } }, _sum: { quantity: true, total: true }, orderBy: { _sum: { quantity: 'desc' } }, take: 5 }),
+    prisma.order.findMany({ where: { createdAt: { gte: new Date(Date.now() - 90 * 86400000) }, status: { not: 'trash' } }, orderBy: { createdAt: 'desc' }, take: 8, select: { id: true, number: true, status: true, total: true, currency: true, billingName: true, billingEmail: true, createdAt: true } }),
+    prisma.$queryRaw`SELECT DATE(createdAt) AS d, COUNT(*) AS orders, SUM(total) AS sales FROM OrderStats WHERE status IN ('processing','completed','on-hold') AND createdAt >= ${since} GROUP BY DATE(createdAt) ORDER BY d`,
+    prisma.orderProductLookup.groupBy({ by: ['productId'], where: { status: paid, createdAt: { gte: since } }, _sum: { quantity: true, netRevenue: true }, orderBy: { _sum: { quantity: 'desc' } }, take: 5 }),
     prisma.productReview.count({ where: { status: 'hold' } }),
   ]);
 
@@ -50,18 +51,20 @@ router.get('/stats', can('view_woocommerce_reports'), ah(async (req, res) => {
   const exStatuses = [...new Set([...excluded.map((x) => String(x).replace(/^wc-/, '')), 'trash', 'checkout-draft'])];
   const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
   const [monthAgg, monthRefunds, topMonth, [lowCount]] = await Promise.all([
-    prisma.order.aggregate({ where: { createdAt: { gte: monthStart }, status: { notIn: exStatuses } }, _sum: { total: true, totalTax: true, shippingTotal: true } }),
+    prisma.orderStats.aggregate({ where: { createdAt: { gte: monthStart }, status: { notIn: exStatuses } }, _sum: { netTotal: true } }),
     prisma.orderRefund.aggregate({ where: { createdAt: { gte: monthStart }, order: { status: { notIn: exStatuses } } }, _sum: { amount: true } }),
-    prisma.orderItem.groupBy({ by: ['productId', 'name'], where: { type: 'line_item', productId: { not: null }, order: { createdAt: { gte: monthStart }, status: { notIn: exStatuses } } }, _sum: { quantity: true }, orderBy: { _sum: { quantity: 'desc' } }, take: 1 }),
+    prisma.orderProductLookup.groupBy({ by: ['productId'], where: { createdAt: { gte: monthStart }, status: { notIn: exStatuses } }, _sum: { quantity: true }, orderBy: { _sum: { quantity: 'desc' } }, take: 1 }),
     prisma.$queryRawUnsafe("SELECT COUNT(*) AS c FROM Product p WHERE p.status = 'publish' AND p.manageStock = 1 AND p.stockQuantity <= COALESCE(p.lowStockAmount, ?) AND p.stockQuantity > ?", t.low, t.none),
   ]);
-  const monthNet = Number(monthAgg._sum.total || 0) - Number(monthAgg._sum.totalTax || 0) - Number(monthAgg._sum.shippingTotal || 0) - Number(monthRefunds._sum.amount || 0);
+  const monthNet = Number(monthAgg._sum.netTotal || 0) - Number(monthRefunds._sum.amount || 0);
+  const nameIds = [...top.map((x) => x.productId), ...topMonth.map((x) => x.productId)];
+  const names = new Map((await prisma.product.findMany({ where: { id: { in: nameIds } }, select: { id: true, name: true } })).map((x) => [x.id, x.name]));
   const outOfStockAll = await prisma.product.count({ where: { stockStatus: 'outofstock', status: 'publish', OR: [{ type: { not: 'variable' } }, { manageStock: true }] } });
 
   res.json({
     woo_status: {
       net_sales_month: money(monthNet, s.dp),
-      top_seller_month: topMonth[0] ? { product_id: topMonth[0].productId, name: topMonth[0].name, quantity: topMonth[0]._sum.quantity } : null,
+      top_seller_month: topMonth[0] ? { product_id: topMonth[0].productId, name: names.get(topMonth[0].productId) || `#${topMonth[0].productId}`, quantity: topMonth[0]._sum.quantity } : null,
       processing: (byStatus.find((b) => b.status === 'processing') || { _count: { _all: 0 } })._count._all,
       on_hold: (byStatus.find((b) => b.status === 'on-hold') || { _count: { _all: 0 } })._count._all,
       low_in_stock: Number(lowCount.c),
@@ -80,8 +83,8 @@ router.get('/stats', can('view_woocommerce_reports'), ah(async (req, res) => {
     pending_reviews: pendingReviews,
     low_stock: lowStock.map((p) => ({ id: p.parentId || p.id, variation_id: p.parentId ? p.id : 0, name: p.name, stock: p.stockQuantity })),
     status_counts: Object.fromEntries(Object.keys(STATUS_LABELS).map((k) => [k, (byStatus.find((b) => b.status === k) || { _count: { _all: 0 } })._count._all])),
-    recent_orders: recent.map((o) => ({ id: o.id, number: o.number || String(o.id), status: o.status, total: money(o.total, s.dp), name: [o.billing?.first_name, o.billing?.last_name].filter(Boolean).join(' ') || o.billing?.email || 'Guest', date: wpDate(o.createdAt, s.gmtOffset) })),
-    top_products: top.map((t) => ({ product_id: t.productId, name: t.name, quantity: t._sum.quantity, total: money(t._sum.total, s.dp) })),
+    recent_orders: recent.map((o) => ({ id: o.id, number: o.number || String(o.id), status: o.status, total: money(o.total, s.dp), name: o.billingName || o.billingEmail || 'Guest', date: wpDate(o.createdAt, s.gmtOffset) })),
+    top_products: top.map((x) => ({ product_id: x.productId, name: names.get(x.productId) || `#${x.productId}`, quantity: x._sum.quantity, total: money(x._sum.netRevenue, s.dp) })),
     series,
   });
 }));

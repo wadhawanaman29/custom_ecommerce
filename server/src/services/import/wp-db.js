@@ -74,6 +74,38 @@ async function metaFor(table, idCol, ids, { all = false } = {}) {
   return out;
 }
 
+// Keyset pagination: yields rows in ID order, BATCH at a time, so memory stays flat on any DB size.
+// sql must end with a WHERE clause (use "WHERE 1=1" if none); idCol may be aliased (e.g. "c.comment_ID").
+const BATCH = 1000;
+async function* batchesOf(sql, params, idCol, size = BATCH) {
+  const key = idCol.split('.').pop();
+  let last = 0;
+  for (;;) {
+    const rows = await q(`${sql} AND ${idCol} > ? ORDER BY ${idCol} LIMIT ${size}`, [...params, last]);
+    if (!rows.length) return;
+    yield rows;
+    last = rows[rows.length - 1][key];
+  }
+}
+// Which of these IDs already exist in the new DB (chunked IN queries)
+async function existingIds(model, ids) {
+  const out = new Set();
+  const uniq = [...new Set(ids.filter((x) => x !== null && x !== undefined && x !== 0))];
+  for (const part of chunks(uniq, 1000)) {
+    for (const r of await prisma[model].findMany({ where: { id: { in: part } }, select: { id: true } })) out.add(r.id);
+  }
+  return out;
+}
+// Term relationships for a set of objects (posts/products) — per batch, not the whole table
+async function relationshipsOf(objIds) {
+  if (!objIds.length) return [];
+  return q(`SELECT object_id AS obj, term_taxonomy_id AS ttid FROM ${T('term_relationships')} WHERE object_id IN (?)`, [objIds]);
+}
+let progressAt = 0;
+function progress(label, n) {
+  if (n - progressAt >= 10000) { progressAt = n; log(`  … ${label}: ${n}`); }
+}
+
 async function insertMany(model, rows) {
   let n = 0;
   for (const part of chunks(rows)) {
@@ -159,51 +191,48 @@ async function migrateOptions() {
 
 async function migrateUsers() {
   log('Users…');
-  const users = await q(`SELECT ID, user_login, user_pass, user_nicename, user_email, user_url, user_registered, display_name FROM ${T('users')}`);
-  const meta = await metaFor('usermeta', 'user_id', users.map((u) => u.ID));
   const capKey = `${P}capabilities`;
   const ROLE_ORDER = ['administrator', 'shop_manager', 'editor', 'author', 'contributor', 'customer', 'subscriber'];
   const B = ['first_name', 'last_name', 'company', 'address_1', 'address_2', 'city', 'postcode', 'country', 'state', 'email', 'phone'];
-  const rows = users.map((u) => {
-    const m = meta.get(u.ID) || new Map();
-    const caps = php(m.get(capKey)) || {};
-    const roles = Object.keys(caps).filter((k) => caps[k]);
-    const role = ROLE_ORDER.find((r) => roles.includes(r)) || roles[0] || 'subscriber';
-    const addr = (type) => Object.fromEntries(B.filter((f) => type === 'billing' || f !== 'email').map((f) => [f, m.get(`${type}_${f}`) || '']));
-    const known = ['first_name', 'last_name', 'description', 'nickname', capKey, `${P}user_level`, 'paying_customer', 'rich_editing', 'syntax_highlighting', 'comment_shortcuts', 'admin_color', 'use_ssl', 'show_admin_bar_front', 'locale', 'dismissed_wp_pointers', 'session_tokens', 'last_update', 'wc_last_active']
-      .concat(B.map((f) => `billing_${f}`), B.map((f) => `shipping_${f}`));
-    return {
-      id: u.ID,
-      login: u.user_login,
-      email: (u.user_email || `user${u.ID}@invalid.local`).toLowerCase(),
-      passwordHash: u.user_pass,
-      displayName: u.display_name || u.user_login,
-      firstName: m.get('first_name') || '',
-      lastName: m.get('last_name') || '',
-      nicename: u.user_nicename || '',
-      url: u.user_url || '',
-      description: m.get('description') || '',
-      role,
-      billing: addr('billing'),
-      shipping: addr('shipping'),
-      isPayingCustomer: m.get('paying_customer') === '1',
-      meta: publicMeta(m, known).filter((x) => !x.key.startsWith(P)),
-      createdAt: gmt(u.user_registered) || new Date(),
-      updatedAt: gmt(u.user_registered) || new Date(),
-    };
-  });
-  // Duplicate emails would violate the unique index — suffix them
-  const seen = new Set();
-  for (const r of rows) {
-    if (seen.has(r.email)) r.email = `${r.email.replace('@', `+dup${r.id}@`)}`;
-    seen.add(r.email);
+  const known = ['first_name', 'last_name', 'description', 'nickname', capKey, `${P}user_level`, 'paying_customer', 'rich_editing', 'syntax_highlighting', 'comment_shortcuts', 'admin_color', 'use_ssl', 'show_admin_bar_front', 'locale', 'dismissed_wp_pointers', 'session_tokens', 'last_update', 'wc_last_active']
+    .concat(B.map((f) => `billing_${f}`), B.map((f) => `shipping_${f}`));
+  let total = 0;
+  let inserted = 0;
+  progressAt = 0;
+  for await (const users of batchesOf(`SELECT ID, user_login, user_pass, user_nicename, user_email, user_url, user_registered, display_name FROM ${T('users')} WHERE 1=1`, [], 'ID')) {
+    const meta = await metaFor('usermeta', 'user_id', users.map((u) => u.ID));
+    const rows = users.map((u) => {
+      const m = meta.get(u.ID) || new Map();
+      const caps = php(m.get(capKey)) || {};
+      const roles = Object.keys(caps).filter((k) => caps[k]);
+      const role = ROLE_ORDER.find((r) => roles.includes(r)) || roles[0] || 'subscriber';
+      const addr = (type) => Object.fromEntries(B.filter((f) => type === 'billing' || f !== 'email').map((f) => [f, m.get(`${type}_${f}`) || '']));
+      return {
+        id: u.ID, login: u.user_login, email: (u.user_email || `user${u.ID}@invalid.local`).toLowerCase(), passwordHash: u.user_pass,
+        displayName: u.display_name || u.user_login, firstName: m.get('first_name') || '', lastName: m.get('last_name') || '',
+        nicename: u.user_nicename || '', url: u.user_url || '', description: m.get('description') || '', role,
+        billing: addr('billing'), shipping: addr('shipping'), isPayingCustomer: m.get('paying_customer') === '1',
+        meta: publicMeta(m, known).filter((x) => !x.key.startsWith(P)),
+        createdAt: gmt(u.user_registered) || new Date(), updatedAt: gmt(u.user_registered) || new Date(),
+      };
+    });
+    // Duplicate emails would violate the unique index — suffix them (checked against the DB, not memory)
+    const taken = new Map((await prisma.user.findMany({ where: { email: { in: rows.map((r) => r.email) } }, select: { id: true, email: true } })).map((e) => [e.email, e.id]));
+    const seen = new Set();
+    for (const r of rows) {
+      if ((taken.has(r.email) && taken.get(r.email) !== r.id) || seen.has(r.email)) r.email = r.email.replace('@', `+dup${r.id}@`);
+      seen.add(r.email);
+    }
+    inserted += await insertMany('user', rows);
+    total += rows.length;
+    progress('users', total);
   }
-  log(`  ${await insertMany('user', rows)} users`);
+  log(`  ${inserted} new users (${total} in WordPress)`);
 
   if (await tableExists('woocommerce_api_keys')) {
     const keys = await q(`SELECT * FROM ${T('woocommerce_api_keys')}`);
-    const valid = keys.filter((k) => rows.some((u) => u.id === k.user_id));
-    const n = await insertMany('apiKey', valid.map((k) => ({
+    const users = await existingIds('user', keys.map((k) => k.user_id));
+    const n = await insertMany('apiKey', keys.filter((k) => users.has(k.user_id)).map((k) => ({
       id: k.key_id, userId: k.user_id, description: k.description || '', permissions: k.permissions,
       consumerKey: k.consumer_key, consumerSecret: k.consumer_secret, truncatedKey: k.truncated_key || '', lastAccess: gmt(k.last_access),
     })));
@@ -213,36 +242,33 @@ async function migrateUsers() {
 
 async function migrateMedia() {
   log('Media…');
-  const posts = await q(`SELECT ID, post_title, post_name, post_excerpt, post_content, post_mime_type, post_author, post_date_gmt, post_modified_gmt, guid FROM ${T('posts')} WHERE post_type = 'attachment'`);
-  const meta = await metaFor('postmeta', 'post_id', posts.map((p) => p.ID));
-  const userIds = new Set((await prisma.user.findMany({ select: { id: true } })).map((u) => u.id));
-  const rows = posts.map((p) => {
-    const m = meta.get(p.ID) || new Map();
-    const file = m.get('_wp_attached_file') || String(p.guid).replace(/^.*\/wp-content\/uploads\//, '');
-    const md = php(m.get('_wp_attachment_metadata')) || {};
-    const isRemote = /^https?:/i.test(file);
-    let path = file;
-    if (!isRemote && REMOTE_MEDIA && UPLOADS_URL) path = `${UPLOADS_URL}/${file}`;
-    return {
-      id: p.ID,
-      title: p.post_title || '',
-      slug: p.post_name || '',
-      fileName: String(file).split('/').pop(),
-      path,
-      mimeType: p.post_mime_type || 'application/octet-stream',
-      fileSize: parseInt(md.filesize, 10) || 0,
-      width: parseInt(md.width, 10) || null,
-      height: parseInt(md.height, 10) || null,
-      altText: m.get('_wp_attachment_image_alt') || '',
-      caption: p.post_excerpt || '',
-      description: p.post_content || '',
-      sizes: md.sizes && typeof md.sizes === 'object' ? md.sizes : null,
-      authorId: userIds.has(p.post_author) ? p.post_author : null,
-      createdAt: gmt(p.post_date_gmt) || new Date(),
-      updatedAt: gmt(p.post_modified_gmt) || new Date(),
-    };
-  });
-  log(`  ${await insertMany('media', rows)} media items${REMOTE_MEDIA ? ' (remote URLs)' : ' — copy wp-content/uploads/* into server/uploads/'}`);
+  let total = 0;
+  let inserted = 0;
+  progressAt = 0;
+  for await (const posts of batchesOf(`SELECT ID, post_title, post_name, post_excerpt, post_content, post_mime_type, post_author, post_date_gmt, post_modified_gmt, guid FROM ${T('posts')} WHERE post_type = 'attachment'`, [], 'ID')) {
+    const meta = await metaFor('postmeta', 'post_id', posts.map((x) => x.ID));
+    const authors = await existingIds('user', posts.map((x) => x.post_author));
+    const rows = posts.map((x) => {
+      const m = meta.get(x.ID) || new Map();
+      const file = m.get('_wp_attached_file') || String(x.guid).replace(/^.*\/wp-content\/uploads\//, '');
+      const md = php(m.get('_wp_attachment_metadata')) || {};
+      const isRemote = /^https?:/i.test(file);
+      let path = file;
+      if (!isRemote && REMOTE_MEDIA && UPLOADS_URL) path = `${UPLOADS_URL}/${file}`;
+      return {
+        id: x.ID, title: x.post_title || '', slug: x.post_name || '', fileName: String(file).split('/').pop(), path,
+        mimeType: x.post_mime_type || 'application/octet-stream', fileSize: parseInt(md.filesize, 10) || 0,
+        width: parseInt(md.width, 10) || null, height: parseInt(md.height, 10) || null, altText: m.get('_wp_attachment_image_alt') || '',
+        caption: x.post_excerpt || '', description: x.post_content || '', sizes: md.sizes && typeof md.sizes === 'object' ? md.sizes : null,
+        authorId: authors.has(x.post_author) ? x.post_author : null,
+        createdAt: gmt(x.post_date_gmt) || new Date(), updatedAt: gmt(x.post_modified_gmt) || new Date(),
+      };
+    });
+    inserted += await insertMany('media', rows);
+    total += rows.length;
+    progress('media', total);
+  }
+  log(`  ${inserted} new media items (${total} in WordPress)${REMOTE_MEDIA ? ' (remote URLs)' : ' — copy wp-content/uploads/* into server/uploads/'}`);
 }
 
 async function termsOf(taxonomy) {
@@ -295,9 +321,9 @@ async function contentMeta(m) {
 
 async function migrateCatalogTerms() {
   log('Product categories, tags, shipping classes, attributes…');
-  const mediaIds = new Set((await prisma.media.findMany({ select: { id: true } })).map((m) => m.id));
   const cats = await termsOf('product_cat');
   const tmeta = await metaFor('termmeta', 'term_id', cats.map((c) => c.id));
+  const mediaIds = await existingIds('media', cats.map((c) => parseInt((tmeta.get(c.id) || new Map()).get('thumbnail_id'), 10)).filter(Boolean));
   const catRows = [];
   for (const c of cats) {
     const m = tmeta.get(c.id) || new Map();
@@ -341,11 +367,7 @@ async function migrateCatalogTerms() {
 
 async function migrateProducts() {
   log('Products…');
-  const posts = await q(`SELECT ID, post_title, post_name, post_content, post_excerpt, post_status, post_parent, menu_order, comment_status, post_type, post_date_gmt, post_modified_gmt FROM ${T('posts')} WHERE post_type IN ('product','product_variation') AND post_status NOT IN ('auto-draft','inherit') ORDER BY post_type = 'product_variation', ID`);
-  const ids = posts.map((p) => p.ID);
-  const meta = await metaFor('postmeta', 'post_id', ids);
-
-  // product_type, product_visibility, shipping class, cats, tags, attribute terms
+  // Small lookup sets (terms/attributes) are loaded once; products, meta and relationships per batch
   const typeTerms = await termsOf('product_type');
   const visTerms = await termsOf('product_visibility');
   const cats = await termsOf('product_cat');
@@ -356,217 +378,207 @@ async function migrateProducts() {
   for (const a of attrs) attrTerms.set(`pa_${a.attribute_name}`, await termsOf(`pa_${a.attribute_name}`));
   const allTerms = [...typeTerms, ...visTerms, ...cats, ...tags, ...classes, ...[...attrTerms.values()].flat()];
   const ttidToTerm = new Map(allTerms.map((t) => [t.ttid, t]));
-  const rels = await relationships(allTerms.map((t) => t.ttid));
-  const termsByObj = new Map();
-  for (const r of rels) {
-    if (!termsByObj.has(r.obj)) termsByObj.set(r.obj, []);
-    termsByObj.get(r.obj).push(ttidToTerm.get(r.ttid));
-  }
   const typeSet = new Set(typeTerms.map((t) => t.ttid));
-  const visBy = new Map(visTerms.map((t) => [t.slug, t.ttid]));
-  const catIds = new Set(cats.map((c) => c.id));
-  const tagIds = new Set(tags.map((t) => t.id));
-  const classIds = new Set(classes.map((c) => c.id));
-  const mediaIds = new Set((await prisma.media.findMany({ select: { id: true } })).map((m) => m.id));
+  const visTtids = new Set(visTerms.map((t) => t.ttid));
+  const catTtids = new Set(cats.map((c) => c.ttid));
+  const tagTtids = new Set(tags.map((t) => t.ttid));
+  const classTtids = new Set(classes.map((c) => c.ttid));
   const termSlugToName = new Map(); // `${taxonomy}|${slug}` -> name
   for (const [tax, list] of attrTerms) for (const t of list) termSlugToName.set(`${tax}|${t.slug}`, t.name);
   const attrByTax = new Map(attrs.map((a) => [`pa_${a.attribute_name}`, a]));
-
+  const attrTtids = new Map([...attrTerms].map(([tax, list]) => [tax, new Set(list.map((t) => t.ttid))]));
   const KNOWN = ['total_sales'];
-  const products = [];
-  const images = [];
-  const productAttrs = [];
-  const catPairs = [];
-  const tagPairs = [];
-  const productIdSet = new Set(posts.filter((p) => p.post_type === 'product').map((p) => p.ID));
-
-  for (const p of posts) {
-    const m = meta.get(p.ID) || new Map();
-    const objTerms = (termsByObj.get(p.ID) || []).filter(Boolean);
-    const isVar = p.post_type === 'product_variation';
-    if (isVar && !productIdSet.has(p.post_parent)) continue; // orphan variation
-    const typeTerm = objTerms.find((t) => typeSet.has(t.ttid));
-    const vis = new Set(objTerms.filter((t) => [...visBy.values()].includes(t.ttid)).map((t) => t.slug));
-    let catalogVisibility = 'visible';
-    if (vis.has('exclude-from-catalog') && vis.has('exclude-from-search')) catalogVisibility = 'hidden';
-    else if (vis.has('exclude-from-catalog')) catalogVisibility = 'search';
-    else if (vis.has('exclude-from-search')) catalogVisibility = 'catalog';
-    const cls = objTerms.find((t) => classIds.has(t.id) && classes.some((c) => c.ttid === t.ttid));
-    const files = php(m.get('_downloadable_files')) || {};
-
-    // Variation attributes (attribute_pa_color = slug → name)
-    let variationAttributes = null;
-    if (isVar) {
-      variationAttributes = [];
-      for (const [k, v] of m) {
-        if (!k.startsWith('attribute_')) continue;
-        const tax = k.slice(10);
-        const a = attrByTax.get(tax);
-        if (a) variationAttributes.push({ id: a.attribute_id, name: a.attribute_label || a.attribute_name, option: v ? termSlugToName.get(`${tax}|${v}`) || v : '' });
-        else variationAttributes.push({ id: 0, name: tax.replace(/-/g, ' ').replace(/^\w/, (c) => c.toUpperCase()), option: v || '' });
-      }
-    }
-    const defaults = php(m.get('_default_attributes'));
-    const defaultAttributes = defaults && typeof defaults === 'object'
-      ? Object.entries(defaults).map(([tax, slug]) => {
-        const a = attrByTax.get(tax);
-        return { id: a ? a.attribute_id : 0, name: a ? a.attribute_label || a.attribute_name : tax, option: a ? termSlugToName.get(`${tax}|${slug}`) || slug : slug };
-      })
-      : null;
-
-    let status = p.post_status;
-    if (isVar) status = p.post_status === 'private' ? 'private' : 'publish';
-
-    products.push({
-      id: p.ID,
-      type: isVar ? 'variation' : (typeTerm ? typeTerm.slug : 'simple'),
-      parentId: isVar ? p.post_parent : null,
-      name: p.post_title || '',
-      slug: p.post_name || String(p.ID),
-      status,
-      featured: vis.has('featured'),
-      catalogVisibility,
-      description: p.post_content || '',
-      shortDescription: isVar ? '' : p.post_excerpt || '',
-      ...(isVar ? { description: m.get('_variation_description') || '' } : {}),
-      sku: (m.get('_sku') || '').trim() || null,
-      price: num(m.get('_price')),
-      regularPrice: num(m.get('_regular_price')),
-      salePrice: num(m.get('_sale_price')),
-      dateOnSaleFrom: ts(m.get('_sale_price_dates_from')),
-      dateOnSaleTo: ts(m.get('_sale_price_dates_to')),
-      virtual: yes(m.get('_virtual')),
-      downloadable: yes(m.get('_downloadable')),
-      downloads: Object.entries(files).map(([id, f]) => ({ id, name: f.name || '', file: f.file || '' })),
-      downloadLimit: parseInt(m.get('_download_limit'), 10) || -1,
-      downloadExpiry: parseInt(m.get('_download_expiry'), 10) || -1,
-      externalUrl: m.get('_product_url') || '',
-      buttonText: m.get('_button_text') || '',
-      taxStatus: m.get('_tax_status') || 'taxable',
-      taxClass: m.get('_tax_class') === 'parent' ? '' : m.get('_tax_class') || '',
-      manageStock: yes(m.get('_manage_stock')),
-      stockQuantity: m.get('_stock') !== undefined && m.get('_stock') !== null && m.get('_stock') !== '' ? Math.round(Number(m.get('_stock'))) : null,
-      stockStatus: m.get('_stock_status') || 'instock',
-      backorders: m.get('_backorders') || 'no',
-      lowStockAmount: m.get('_low_stock_amount') ? parseInt(m.get('_low_stock_amount'), 10) : null,
-      soldIndividually: yes(m.get('_sold_individually')),
-      weight: m.get('_weight') || '',
-      length: m.get('_length') || '',
-      width: m.get('_width') || '',
-      height: m.get('_height') || '',
-      shippingClassId: cls ? cls.id : null,
-      reviewsAllowed: p.comment_status === 'open',
-      averageRating: num(m.get('_wc_average_rating')) || 0,
-      ratingCount: (() => { const rc = php(m.get('_wc_rating_count')); return rc && typeof rc === 'object' ? Object.values(rc).reduce((a, b) => a + Number(b), 0) : parseInt(rc, 10) || 0; })(),
-      totalSales: parseInt(m.get('total_sales'), 10) || 0,
-      purchaseNote: m.get('_purchase_note') || '',
-      menuOrder: p.menu_order || 0,
-      upsellIds: toArr(m.get('_upsell_ids')).map(Number),
-      crossSellIds: toArr(m.get('_crosssell_ids')).map(Number),
-      groupedProducts: toArr(m.get('_children')).map(Number),
-      variationAttributes,
-      defaultAttributes,
-      meta: publicMeta(m, KNOWN).filter((x) => !x.key.startsWith('attribute_')),
-      createdAt: gmt(p.post_date_gmt) || new Date(),
-      updatedAt: gmt(p.post_modified_gmt) || new Date(),
-    });
-
-    // Images: thumbnail first, then gallery
-    const imgIds = [parseInt(m.get('_thumbnail_id'), 10), ...csvIds(m.get('_product_image_gallery'))].filter((x) => x && mediaIds.has(x));
-    [...new Set(imgIds)].forEach((mediaId, position) => images.push({ productId: p.ID, mediaId, position }));
-
-    if (!isVar) {
-      for (const t of objTerms) {
-        if (catIds.has(t.id) && cats.some((c) => c.ttid === t.ttid)) catPairs.push([p.ID, t.id]);
-        if (tagIds.has(t.id) && tags.some((c) => c.ttid === t.ttid)) tagPairs.push([p.ID, t.id]);
-      }
-      // _product_attributes
-      const pa = php(m.get('_product_attributes')) || {};
-      Object.values(pa).forEach((a, i) => {
-        if (!a || typeof a !== 'object') return;
-        const isTax = yes(String(a.is_taxonomy));
-        let options;
-        let attributeId = 0;
-        let name = a.name;
-        if (isTax) {
-          const g = attrByTax.get(a.name);
-          attributeId = g ? g.attribute_id : 0;
-          name = g ? g.attribute_label || g.attribute_name : a.name;
-          const list = attrTerms.get(a.name) || [];
-          options = objTerms.filter((t) => list.some((x) => x.ttid === t.ttid)).map((t) => t.name);
-        } else {
-          options = String(a.value || '').split('|').map((s) => s.trim()).filter(Boolean);
-        }
-        productAttrs.push({
-          productId: p.ID, attributeId, name: name || '', position: parseInt(a.position, 10) || i,
-          visible: yes(String(a.is_visible)), variation: yes(String(a.is_variation)), options,
-        });
-      });
-    }
-  }
-
-  // Duplicate SKUs would break the unique index: keep the first, clear the rest
-  const skus = new Set();
-  for (const p of products) {
-    if (!p.sku) continue;
-    if (skus.has(p.sku)) { console.warn(`  ! duplicate SKU "${p.sku}" on #${p.id} — cleared`); p.sku = null; } else skus.add(p.sku);
-  }
-
-  const parents = products.filter((p) => p.type !== 'variation');
-  const vars = products.filter((p) => p.type === 'variation');
-  log(`  ${await insertMany('product', parents)} products, ${await insertMany('product', vars)} variations`);
-  // Variable parents store several _price rows in WC — recompute from variations
   const { syncVariableParent } = require('../product');
-  for (const p of parents.filter((x) => x.type === 'variable')) await syncVariableParent(p.id);
-  log(`  ${await insertMany('productImage', images)} product images`);
-  if (await prisma.productAttribute.count() === 0) log(`  ${await insertMany('productAttribute', productAttrs)} product attributes`);
-  log(`  ${await linkMany('_ProductToCategory', 'Product', catPairs)} category links, ${await linkMany('_ProductToTag', 'Product', tagPairs)} tag links`);
+  const counts = { products: 0, variations: 0, images: 0, attributes: 0, catLinks: 0, tagLinks: 0, seen: 0 };
+  progressAt = 0;
 
-  // Reviews
-  const reviews = await q(`SELECT comment_ID, comment_post_ID, comment_author, comment_author_email, comment_content, comment_approved, comment_date_gmt FROM ${T('comments')} WHERE comment_type IN ('review','') AND comment_post_ID IN (SELECT ID FROM ${T('posts')} WHERE post_type = 'product')`);
-  const cm = await metaFor('commentmeta', 'comment_id', reviews.map((r) => r.comment_ID));
+  for (const postType of ['product', 'product_variation']) {
+    const isVar = postType === 'product_variation';
+    for await (const posts of batchesOf(`SELECT ID, post_title, post_name, post_content, post_excerpt, post_status, post_parent, menu_order, comment_status, post_type, post_date_gmt, post_modified_gmt FROM ${T('posts')} WHERE post_type = ? AND post_status NOT IN ('auto-draft','inherit')`, [postType], 'ID')) {
+      const ids = posts.map((x) => x.ID);
+      const meta = await metaFor('postmeta', 'post_id', ids);
+      const termsByObj = new Map();
+      for (const r of await relationshipsOf(ids)) {
+        const t = ttidToTerm.get(r.ttid);
+        if (!t) continue;
+        if (!termsByObj.has(r.obj)) termsByObj.set(r.obj, []);
+        termsByObj.get(r.obj).push(t);
+      }
+      const parentsOk = isVar ? await existingIds('product', posts.map((x) => x.post_parent)) : null;
+      const imageCandidates = [];
+      for (const x of posts) { const m = meta.get(x.ID) || new Map(); imageCandidates.push(parseInt(m.get('_thumbnail_id'), 10), ...csvIds(m.get('_product_image_gallery'))); }
+      const mediaOk = await existingIds('media', imageCandidates.filter(Boolean));
+      const products = [];
+      const images = [];
+      const productAttrs = [];
+      const catPairs = [];
+      const tagPairs = [];
+
+      for (const x of posts) {
+        const m = meta.get(x.ID) || new Map();
+        const objTerms = termsByObj.get(x.ID) || [];
+        if (isVar && !parentsOk.has(x.post_parent)) continue; // orphan variation
+        const typeTerm = objTerms.find((t) => typeSet.has(t.ttid));
+        const vis = new Set(objTerms.filter((t) => visTtids.has(t.ttid)).map((t) => t.slug));
+        let catalogVisibility = 'visible';
+        if (vis.has('exclude-from-catalog') && vis.has('exclude-from-search')) catalogVisibility = 'hidden';
+        else if (vis.has('exclude-from-catalog')) catalogVisibility = 'search';
+        else if (vis.has('exclude-from-search')) catalogVisibility = 'catalog';
+        const cls = objTerms.find((t) => classTtids.has(t.ttid));
+        const files = php(m.get('_downloadable_files')) || {};
+        let variationAttributes = null;
+        if (isVar) {
+          variationAttributes = [];
+          for (const [k, v] of m) {
+            if (!k.startsWith('attribute_')) continue;
+            const tax = k.slice(10);
+            const a = attrByTax.get(tax);
+            if (a) variationAttributes.push({ id: a.attribute_id, name: a.attribute_label || a.attribute_name, option: v ? termSlugToName.get(`${tax}|${v}`) || v : '' });
+            else variationAttributes.push({ id: 0, name: tax.replace(/-/g, ' ').replace(/^\w/, (c) => c.toUpperCase()), option: v || '' });
+          }
+        }
+        const defaults = php(m.get('_default_attributes'));
+        const defaultAttributes = defaults && typeof defaults === 'object'
+          ? Object.entries(defaults).map(([tax, slug]) => {
+            const a = attrByTax.get(tax);
+            return { id: a ? a.attribute_id : 0, name: a ? a.attribute_label || a.attribute_name : tax, option: a ? termSlugToName.get(`${tax}|${slug}`) || slug : slug };
+          })
+          : null;
+        let status = x.post_status;
+        if (isVar) status = x.post_status === 'private' ? 'private' : 'publish';
+        products.push({
+          id: x.ID, type: isVar ? 'variation' : (typeTerm ? typeTerm.slug : 'simple'), parentId: isVar ? x.post_parent : null,
+          name: x.post_title || '', slug: x.post_name || String(x.ID), status, featured: vis.has('featured'), catalogVisibility,
+          description: isVar ? m.get('_variation_description') || '' : x.post_content || '', shortDescription: isVar ? '' : x.post_excerpt || '',
+          sku: (m.get('_sku') || '').trim() || null,
+          price: num(m.get('_price')), regularPrice: num(m.get('_regular_price')), salePrice: num(m.get('_sale_price')),
+          dateOnSaleFrom: ts(m.get('_sale_price_dates_from')), dateOnSaleTo: ts(m.get('_sale_price_dates_to')),
+          virtual: yes(m.get('_virtual')), downloadable: yes(m.get('_downloadable')),
+          downloads: Object.entries(files).map(([id, f]) => ({ id, name: f.name || '', file: f.file || '' })),
+          downloadLimit: parseInt(m.get('_download_limit'), 10) || -1, downloadExpiry: parseInt(m.get('_download_expiry'), 10) || -1,
+          externalUrl: m.get('_product_url') || '', buttonText: m.get('_button_text') || '',
+          taxStatus: m.get('_tax_status') || 'taxable', taxClass: m.get('_tax_class') === 'parent' ? '' : m.get('_tax_class') || '',
+          manageStock: yes(m.get('_manage_stock')),
+          stockQuantity: m.get('_stock') !== undefined && m.get('_stock') !== null && m.get('_stock') !== '' ? Math.round(Number(m.get('_stock'))) : null,
+          stockStatus: m.get('_stock_status') || 'instock', backorders: m.get('_backorders') || 'no',
+          lowStockAmount: m.get('_low_stock_amount') ? parseInt(m.get('_low_stock_amount'), 10) : null, soldIndividually: yes(m.get('_sold_individually')),
+          weight: m.get('_weight') || '', length: m.get('_length') || '', width: m.get('_width') || '', height: m.get('_height') || '',
+          shippingClassId: cls ? cls.id : null, reviewsAllowed: x.comment_status === 'open',
+          averageRating: num(m.get('_wc_average_rating')) || 0,
+          ratingCount: (() => { const rc = php(m.get('_wc_rating_count')); return rc && typeof rc === 'object' ? Object.values(rc).reduce((a, b) => a + Number(b), 0) : parseInt(rc, 10) || 0; })(),
+          totalSales: parseInt(m.get('total_sales'), 10) || 0, purchaseNote: m.get('_purchase_note') || '', menuOrder: x.menu_order || 0,
+          upsellIds: toArr(m.get('_upsell_ids')).map(Number), crossSellIds: toArr(m.get('_crosssell_ids')).map(Number), groupedProducts: toArr(m.get('_children')).map(Number),
+          variationAttributes, defaultAttributes,
+          meta: publicMeta(m, KNOWN).filter((y) => !y.key.startsWith('attribute_')),
+          createdAt: gmt(x.post_date_gmt) || new Date(), updatedAt: gmt(x.post_modified_gmt) || new Date(),
+        });
+        const imgIds = [parseInt(m.get('_thumbnail_id'), 10), ...csvIds(m.get('_product_image_gallery'))].filter((y) => y && mediaOk.has(y));
+        [...new Set(imgIds)].forEach((mediaId, position) => images.push({ productId: x.ID, mediaId, position }));
+        if (!isVar) {
+          for (const t of objTerms) {
+            if (catTtids.has(t.ttid)) catPairs.push([x.ID, t.id]);
+            if (tagTtids.has(t.ttid)) tagPairs.push([x.ID, t.id]);
+          }
+          const pa = php(m.get('_product_attributes')) || {};
+          Object.values(pa).forEach((a, i) => {
+            if (!a || typeof a !== 'object') return;
+            const isTax = yes(String(a.is_taxonomy));
+            let options;
+            let attributeId = 0;
+            let name = a.name;
+            if (isTax) {
+              const g = attrByTax.get(a.name);
+              attributeId = g ? g.attribute_id : 0;
+              name = g ? g.attribute_label || g.attribute_name : a.name;
+              const tt = attrTtids.get(a.name) || new Set();
+              options = objTerms.filter((t) => tt.has(t.ttid)).map((t) => t.name);
+            } else {
+              options = String(a.value || '').split('|').map((v) => v.trim()).filter(Boolean);
+            }
+            productAttrs.push({ productId: x.ID, attributeId, name: name || '', position: parseInt(a.position, 10) || i, visible: yes(String(a.is_visible)), variation: yes(String(a.is_variation)), options });
+          });
+        }
+      }
+      // Duplicate SKUs would break the unique index: checked against the DB + this batch
+      const skuRows = await prisma.product.findMany({ where: { sku: { in: products.map((y) => y.sku).filter(Boolean) } }, select: { id: true, sku: true } });
+      const skuOwner = new Map(skuRows.map((r) => [r.sku, r.id]));
+      for (const y of products) {
+        if (!y.sku) continue;
+        if (skuOwner.has(y.sku) && skuOwner.get(y.sku) !== y.id) { log(`  ! duplicate SKU "${y.sku}" on #${y.id} — cleared`); y.sku = null; } else skuOwner.set(y.sku, y.id);
+      }
+      const n = await insertMany('product', products);
+      if (isVar) counts.variations += n; else counts.products += n;
+      counts.images += await insertMany('productImage', images);
+      // Attributes have no natural key: only add them for products that have none yet (re-runs stay clean)
+      const withAttrs = new Set((await prisma.productAttribute.findMany({ where: { productId: { in: ids } }, select: { productId: true }, distinct: ['productId'] })).map((r) => r.productId));
+      counts.attributes += await insertMany('productAttribute', productAttrs.filter((a) => !withAttrs.has(a.productId)));
+      counts.catLinks += await linkMany('_ProductToCategory', 'Product', catPairs);
+      counts.tagLinks += await linkMany('_ProductToTag', 'Product', tagPairs);
+      // Variable parents store several _price rows in WC — recompute from variations
+      if (isVar) for (const pid of new Set(products.map((y) => y.parentId))) await syncVariableParent(pid);
+      counts.seen += posts.length;
+      progress('products & variations', counts.seen);
+    }
+  }
+  log(`  ${counts.products} products, ${counts.variations} variations, ${counts.images} images, ${counts.attributes} attributes`);
+  log(`  ${counts.catLinks} category links, ${counts.tagLinks} tag links`);
+
+  // Reviews (comments on products), batched
   const statusOf = (a) => ({ 1: 'approved', 0: 'hold', spam: 'spam', trash: 'trash' }[a] || 'hold');
-  const nReviews = await insertMany('productReview', reviews.filter((r) => productIdSet.has(r.comment_post_ID)).map((r) => {
-    const m = cm.get(r.comment_ID) || new Map();
-    return {
-      id: r.comment_ID, productId: r.comment_post_ID, status: statusOf(String(r.comment_approved)), reviewer: r.comment_author || '',
-      reviewerEmail: r.comment_author_email || '', review: r.comment_content || '', rating: parseInt(m.get('rating'), 10) || 0,
-      verified: m.get('verified') === '1', createdAt: gmt(r.comment_date_gmt) || new Date(),
-    };
-  }));
+  let nReviews = 0;
+  for await (const reviews of batchesOf(`SELECT c.comment_ID, c.comment_post_ID, c.comment_author, c.comment_author_email, c.comment_content, c.comment_approved, c.comment_date_gmt FROM ${T('comments')} c JOIN ${T('posts')} p ON p.ID = c.comment_post_ID AND p.post_type = 'product' WHERE c.comment_type IN ('review','')`, [], 'c.comment_ID')) {
+    const cm = await metaFor('commentmeta', 'comment_id', reviews.map((r) => r.comment_ID));
+    const productsOk = await existingIds('product', reviews.map((r) => r.comment_post_ID));
+    nReviews += await insertMany('productReview', reviews.filter((r) => productsOk.has(r.comment_post_ID)).map((r) => {
+      const m = cm.get(r.comment_ID) || new Map();
+      return {
+        id: r.comment_ID, productId: r.comment_post_ID, status: statusOf(String(r.comment_approved)), reviewer: r.comment_author || '',
+        reviewerEmail: r.comment_author_email || '', review: r.comment_content || '', rating: parseInt(m.get('rating'), 10) || 0,
+        verified: m.get('verified') === '1', createdAt: gmt(r.comment_date_gmt) || new Date(),
+      };
+    }));
+  }
   log(`  ${nReviews} reviews`);
 }
 
 async function migrateCoupons() {
   log('Coupons…');
-  const posts = await q(`SELECT ID, post_title, post_excerpt, post_status, post_date_gmt, post_modified_gmt FROM ${T('posts')} WHERE post_type = 'shop_coupon' AND post_status NOT IN ('auto-draft')`);
-  const meta = await metaFor('postmeta', 'post_id', posts.map((p) => p.ID), { all: true });
   const one = (m, k) => (m.get(k) || [])[0];
-  const seen = new Set();
-  const rows = [];
-  for (const p of posts) {
-    const m = meta.get(p.ID) || new Map();
-    const code = String(p.post_title || '').trim().toLowerCase();
-    if (!code || seen.has(code)) continue;
-    seen.add(code);
-    const int = (k) => { const v = parseInt(one(m, k), 10); return v > 0 ? v : null; };
-    rows.push({
-      id: p.ID, code, status: p.post_status, description: p.post_excerpt || '',
-      amount: num(one(m, 'coupon_amount')) || 0, discountType: one(m, 'discount_type') || 'fixed_cart',
-      dateExpires: ts(one(m, 'date_expires')) || (one(m, 'expiry_date') ? gmt(`${one(m, 'expiry_date')} 23:59:59`) : null),
-      usageCount: parseInt(one(m, 'usage_count'), 10) || 0, individualUse: yes(one(m, 'individual_use')),
-      productIds: csvIds(one(m, 'product_ids')), excludedProductIds: csvIds(one(m, 'exclude_product_ids')),
-      usageLimit: int('usage_limit'), usageLimitPerUser: int('usage_limit_per_user'), limitUsageToXItems: int('limit_usage_to_x_items'),
-      freeShipping: yes(one(m, 'free_shipping')),
-      productCategories: toArr(one(m, 'product_categories')).map(Number), excludedProductCategories: toArr(one(m, 'exclude_product_categories')).map(Number),
-      excludeSaleItems: yes(one(m, 'exclude_sale_items')),
-      minimumAmount: num(one(m, 'minimum_amount')), maximumAmount: num(one(m, 'maximum_amount')),
-      emailRestrictions: toArr(one(m, 'customer_email')).map((e) => String(e).toLowerCase()),
-      usedBy: (m.get('_used_by') || []).map(String),
-      createdAt: gmt(p.post_date_gmt) || new Date(), updatedAt: gmt(p.post_modified_gmt) || new Date(),
-    });
+  let inserted = 0;
+  let usages = 0;
+  for await (const posts of batchesOf(`SELECT ID, post_title, post_excerpt, post_status, post_date_gmt, post_modified_gmt FROM ${T('posts')} WHERE post_type = 'shop_coupon' AND post_status NOT IN ('auto-draft')`, [], 'ID')) {
+    const meta = await metaFor('postmeta', 'post_id', posts.map((x) => x.ID), { all: true });
+    const codes = posts.map((x) => String(x.post_title || '').trim().toLowerCase()).filter(Boolean);
+    const taken = new Set((await prisma.coupon.findMany({ where: { code: { in: codes } }, select: { code: true } })).map((c) => c.code));
+    const rows = [];
+    const usageRows = [];
+    for (const x of posts) {
+      const m = meta.get(x.ID) || new Map();
+      const code = String(x.post_title || '').trim().toLowerCase();
+      if (!code || taken.has(code)) continue;
+      taken.add(code);
+      const int = (k) => { const v = parseInt(one(m, k), 10); return v > 0 ? v : null; };
+      rows.push({
+        id: x.ID, code, status: x.post_status, description: x.post_excerpt || '',
+        amount: num(one(m, 'coupon_amount')) || 0, discountType: one(m, 'discount_type') || 'fixed_cart',
+        dateExpires: ts(one(m, 'date_expires')) || (one(m, 'expiry_date') ? gmt(`${one(m, 'expiry_date')} 23:59:59`) : null),
+        usageCount: parseInt(one(m, 'usage_count'), 10) || 0, individualUse: yes(one(m, 'individual_use')),
+        productIds: csvIds(one(m, 'product_ids')), excludedProductIds: csvIds(one(m, 'exclude_product_ids')),
+        usageLimit: int('usage_limit'), usageLimitPerUser: int('usage_limit_per_user'), limitUsageToXItems: int('limit_usage_to_x_items'),
+        freeShipping: yes(one(m, 'free_shipping')),
+        productCategories: toArr(one(m, 'product_categories')).map(Number), excludedProductCategories: toArr(one(m, 'exclude_product_categories')).map(Number),
+        excludeSaleItems: yes(one(m, 'exclude_sale_items')),
+        minimumAmount: num(one(m, 'minimum_amount')), maximumAmount: num(one(m, 'maximum_amount')),
+        emailRestrictions: toArr(one(m, 'customer_email')).map((e) => String(e).toLowerCase()),
+        createdAt: gmt(x.post_date_gmt) || new Date(), updatedAt: gmt(x.post_modified_gmt) || new Date(),
+      });
+      // "_used_by" (one meta row per use) → CouponUsage rows
+      for (const u of m.get('_used_by') || []) usageRows.push({ couponId: x.ID, usedBy: String(u).toLowerCase().slice(0, 191) });
+    }
+    inserted += await insertMany('coupon', rows);
+    usages += await insertMany('couponUsage', usageRows);
   }
-  log(`  ${await insertMany('coupon', rows)} coupons`);
+  log(`  ${inserted} coupons, ${usages} coupon usages`);
 }
 
 async function migrateTaxesAndShipping() {
@@ -652,90 +664,111 @@ async function migrateOrders() {
   log('Orders…');
   const hposOpt = await q(`SELECT option_value AS v FROM ${T('options')} WHERE option_name = 'woocommerce_custom_orders_table_enabled'`);
   const useHpos = (hposOpt[0] || {}).v === 'yes' && await tableExists('wc_orders');
-  log(`  source: ${useHpos ? 'HPOS (wc_orders)' : 'legacy (wp_posts)'}`);
-  const userIds = new Set((await prisma.user.findMany({ select: { id: true } })).map((u) => u.id));
+  log(`  source: ${useHpos ? 'HPOS (wc_orders)' : 'legacy (wp_posts)'} — importing in batches of ${BATCH}`);
+  const { billingCols, rebuildAll } = require('../order-stats');
   const internal = (reduced, sales, coupons) => [
     ...(reduced ? [{ id: 9001, key: '_order_stock_reduced', value: 'yes' }] : []),
     ...(sales ? [{ id: 9002, key: '_recorded_sales', value: 'yes' }] : []),
     ...(coupons ? [{ id: 9003, key: '_recorded_coupon_usage_counts', value: 'yes' }] : []),
   ];
-  const orders = [];
-  const refunds = [];
+  const counts = { orders: 0, refunds: 0, items: 0, notes: 0, seen: 0 };
+  const firstNewId = { value: null };
+  progressAt = 0;
+
+  async function saveBatch(orders, refunds) {
+    const customers = await existingIds('user', orders.map((o) => o.customerId));
+    for (const o of orders) {
+      if (o.customerId && !customers.has(o.customerId)) o.customerId = null;
+      Object.assign(o, billingCols(o.billing));
+    }
+    counts.orders += await insertMany('order', orders);
+    const ids = orders.map((o) => o.id);
+    if (firstNewId.value === null && ids.length) firstNewId.value = ids[0];
+    const present = await existingIds('order', [...ids, ...refunds.map((r) => r.orderId)]);
+    counts.refunds += await insertMany('orderRefund', refunds.filter((r) => present.has(r.orderId)));
+    counts.items += await insertMany('orderItem', await orderItemsFor(ids));
+    // Order notes for this batch only
+    const notes = ids.length ? await q(`SELECT comment_ID, comment_post_ID, comment_author, comment_content, comment_date_gmt FROM ${T('comments')} WHERE comment_type = 'order_note' AND comment_post_ID IN (?)`, [ids]) : [];
+    const nm = await metaFor('commentmeta', 'comment_id', notes.map((x) => x.comment_ID));
+    counts.notes += await insertMany('orderNote', notes.map((x) => ({
+      id: x.comment_ID, orderId: x.comment_post_ID, note: x.comment_content || '', author: x.comment_author || 'system',
+      customerNote: (nm.get(x.comment_ID) || new Map()).get('is_customer_note') === '1', createdAt: gmt(x.comment_date_gmt) || new Date(),
+    })));
+    counts.seen += orders.length;
+    progress('orders', counts.seen);
+  }
 
   if (useHpos) {
-    const rows = await q(`SELECT * FROM ${T('wc_orders')} WHERE type IN ('shop_order','shop_order_refund') AND status NOT IN ('auto-draft','trash')`);
-    const ids = rows.map((r) => r.id);
-    const addrs = new Map();
-    const ops = new Map();
-    for (const part of chunks(ids, 1000)) {
-      for (const a of await q(`SELECT * FROM ${T('wc_order_addresses')} WHERE order_id IN (?)`, [part])) {
+    for await (const rows of batchesOf(`SELECT * FROM ${T('wc_orders')} WHERE type = 'shop_order' AND status NOT IN ('auto-draft','trash')`, [], 'id')) {
+      const ids = rows.map((r) => r.id);
+      const addrs = new Map();
+      const ops = new Map();
+      for (const a of await q(`SELECT * FROM ${T('wc_order_addresses')} WHERE order_id IN (?)`, [ids])) {
         if (!addrs.has(a.order_id)) addrs.set(a.order_id, {});
         addrs.get(a.order_id)[a.address_type] = Object.fromEntries(ADDR.filter((f) => a.address_type === 'billing' || f !== 'email').map((f) => [f, a[f] || '']));
       }
-      for (const o of await q(`SELECT * FROM ${T('wc_order_operational_data')} WHERE order_id IN (?)`, [part])) ops.set(o.order_id, o);
-    }
-    const meta = await metaFor('wc_orders_meta', 'order_id', ids);
-    for (const r of rows) {
-      const m = meta.get(r.id) || new Map();
-      if (r.type === 'shop_order_refund') {
-        refunds.push({ id: r.id, orderId: r.parent_order_id, amount: Math.abs(num(m.get('_refund_amount')) ?? num(r.total_amount) ?? 0), reason: m.get('_refund_reason') || '', refundedBy: parseInt(m.get('_refunded_by'), 10) || 0, refundedPayment: yes(m.get('_refunded_payment')), createdAt: gmt(r.date_created_gmt) || new Date() });
-        continue;
-      }
-      const op = ops.get(r.id) || {};
-      const a = addrs.get(r.id) || {};
-      orders.push({
-        id: r.id, parentId: r.parent_order_id || 0, number: m.get('_order_number') || String(r.id), orderKey: op.order_key || '', createdVia: op.created_via || 'checkout',
-        version: op.woocommerce_version || '', status: STATUS_MAP(r.status), currency: r.currency || 'USD', pricesIncludeTax: op.prices_include_tax === 1,
-        discountTotal: num(op.discount_total_amount) || 0, discountTax: num(op.discount_tax_amount) || 0, shippingTotal: num(op.shipping_total_amount) || 0,
-        shippingTax: num(op.shipping_tax_amount) || 0, cartTax: (num(r.tax_amount) || 0) - (num(op.shipping_tax_amount) || 0), total: num(r.total_amount) || 0, totalTax: num(r.tax_amount) || 0,
-        customerId: userIds.has(r.customer_id) ? r.customer_id : null, customerIpAddress: r.ip_address || '', customerUserAgent: r.user_agent || '', customerNote: r.customer_note || '',
-        billing: a.billing || Object.fromEntries(ADDR.map((f) => [f, ''])), shipping: a.shipping || Object.fromEntries(ADDR.filter((f) => f !== 'email').map((f) => [f, ''])),
-        paymentMethod: r.payment_method || '', paymentMethodTitle: r.payment_method_title || '', transactionId: r.transaction_id || '',
-        datePaid: gmt(op.date_paid_gmt), dateCompleted: gmt(op.date_completed_gmt), cartHash: op.cart_hash || '',
-        meta: [...publicMeta(m), ...internal(op.order_stock_reduced === 1, op.recorded_sales === 1, op.coupon_usages_are_counted === 1)],
-        createdAt: gmt(r.date_created_gmt) || new Date(), updatedAt: gmt(r.date_updated_gmt) || new Date(),
+      for (const o of await q(`SELECT * FROM ${T('wc_order_operational_data')} WHERE order_id IN (?)`, [ids])) ops.set(o.order_id, o);
+      const meta = await metaFor('wc_orders_meta', 'order_id', ids);
+      const orders = rows.map((r) => {
+        const m = meta.get(r.id) || new Map();
+        const op = ops.get(r.id) || {};
+        const a = addrs.get(r.id) || {};
+        return {
+          id: r.id, parentId: r.parent_order_id || 0, number: m.get('_order_number') || String(r.id), orderKey: op.order_key || '', createdVia: op.created_via || 'checkout',
+          version: op.woocommerce_version || '', status: STATUS_MAP(r.status), currency: r.currency || 'USD', pricesIncludeTax: op.prices_include_tax === 1,
+          discountTotal: num(op.discount_total_amount) || 0, discountTax: num(op.discount_tax_amount) || 0, shippingTotal: num(op.shipping_total_amount) || 0,
+          shippingTax: num(op.shipping_tax_amount) || 0, cartTax: (num(r.tax_amount) || 0) - (num(op.shipping_tax_amount) || 0), total: num(r.total_amount) || 0, totalTax: num(r.tax_amount) || 0,
+          customerId: r.customer_id || null, customerIpAddress: r.ip_address || '', customerUserAgent: r.user_agent || '', customerNote: r.customer_note || '',
+          billing: a.billing || Object.fromEntries(ADDR.map((f) => [f, ''])), shipping: a.shipping || Object.fromEntries(ADDR.filter((f) => f !== 'email').map((f) => [f, ''])),
+          paymentMethod: r.payment_method || '', paymentMethodTitle: r.payment_method_title || '', transactionId: r.transaction_id || '',
+          datePaid: gmt(op.date_paid_gmt), dateCompleted: gmt(op.date_completed_gmt), cartHash: op.cart_hash || '',
+          meta: [...publicMeta(m), ...internal(op.order_stock_reduced === 1, op.recorded_sales === 1, op.coupon_usages_are_counted === 1)],
+          createdAt: gmt(r.date_created_gmt) || new Date(), updatedAt: gmt(r.date_updated_gmt) || new Date(),
+        };
       });
+      const refundRows = await q(`SELECT * FROM ${T('wc_orders')} WHERE type = 'shop_order_refund' AND parent_order_id IN (?)`, [ids]);
+      const rm = await metaFor('wc_orders_meta', 'order_id', refundRows.map((r) => r.id));
+      const refunds = refundRows.map((r) => {
+        const m = rm.get(r.id) || new Map();
+        return { id: r.id, orderId: r.parent_order_id, amount: Math.abs(num(m.get('_refund_amount')) ?? num(r.total_amount) ?? 0), reason: m.get('_refund_reason') || '', refundedBy: parseInt(m.get('_refunded_by'), 10) || 0, refundedPayment: yes(m.get('_refunded_payment')), createdAt: gmt(r.date_created_gmt) || new Date() };
+      });
+      await saveBatch(orders, refunds);
     }
   } else {
-    const rows = await q(`SELECT ID, post_status, post_parent, post_excerpt, post_type, post_date_gmt, post_modified_gmt FROM ${T('posts')} WHERE post_type IN ('shop_order','shop_order_refund') AND post_status NOT IN ('auto-draft','trash')`);
-    const meta = await metaFor('postmeta', 'post_id', rows.map((r) => r.ID));
-    for (const r of rows) {
-      const m = meta.get(r.ID) || new Map();
-      const g = (k) => m.get(k);
-      if (r.post_type === 'shop_order_refund') {
-        refunds.push({ id: r.ID, orderId: r.post_parent, amount: Math.abs(num(g('_refund_amount')) || 0), reason: g('_refund_reason') || r.post_excerpt || '', refundedBy: parseInt(g('_refunded_by'), 10) || 0, refundedPayment: yes(g('_refunded_payment')), createdAt: gmt(r.post_date_gmt) || new Date() });
-        continue;
-      }
-      const addr = (type) => Object.fromEntries(ADDR.filter((f) => type === 'billing' || f !== 'email').map((f) => [f, g(`_${type}_${f}`) || '']));
-      const cust = parseInt(g('_customer_user'), 10) || 0;
-      const orderTax = num(g('_order_tax')) || 0;
-      const shipTax = num(g('_order_shipping_tax')) || 0;
-      orders.push({
-        id: r.ID, parentId: r.post_parent || 0, number: g('_order_number') || String(r.ID), orderKey: g('_order_key') || '', createdVia: g('_created_via') || 'checkout',
-        version: g('_order_version') || '', status: STATUS_MAP(r.post_status), currency: g('_order_currency') || 'USD', pricesIncludeTax: yes(g('_prices_include_tax')),
-        discountTotal: num(g('_cart_discount')) || 0, discountTax: num(g('_cart_discount_tax')) || 0, shippingTotal: num(g('_order_shipping')) || 0, shippingTax: shipTax,
-        cartTax: orderTax, total: num(g('_order_total')) || 0, totalTax: orderTax + shipTax,
-        customerId: userIds.has(cust) ? cust : null, customerIpAddress: g('_customer_ip_address') || '', customerUserAgent: g('_customer_user_agent') || '', customerNote: r.post_excerpt || '',
-        billing: addr('billing'), shipping: addr('shipping'), paymentMethod: g('_payment_method') || '', paymentMethodTitle: g('_payment_method_title') || '', transactionId: g('_transaction_id') || '',
-        datePaid: ts(g('_date_paid')) || ts(g('_paid_date')), dateCompleted: ts(g('_date_completed')) || ts(g('_completed_date')), cartHash: g('_cart_hash') || '',
-        meta: [...publicMeta(m), ...internal(yes(g('_order_stock_reduced')), yes(g('_recorded_sales')), yes(g('_recorded_coupon_usage_counts')))],
-        createdAt: gmt(r.post_date_gmt) || new Date(), updatedAt: gmt(r.post_modified_gmt) || new Date(),
+    for await (const rows of batchesOf(`SELECT ID, post_status, post_parent, post_excerpt, post_date_gmt, post_modified_gmt FROM ${T('posts')} WHERE post_type = 'shop_order' AND post_status NOT IN ('auto-draft','trash')`, [], 'ID')) {
+      const ids = rows.map((r) => r.ID);
+      const meta = await metaFor('postmeta', 'post_id', ids);
+      const orders = rows.map((r) => {
+        const m = meta.get(r.ID) || new Map();
+        const g = (k) => m.get(k);
+        const addr = (type) => Object.fromEntries(ADDR.filter((f) => type === 'billing' || f !== 'email').map((f) => [f, g(`_${type}_${f}`) || '']));
+        const orderTax = num(g('_order_tax')) || 0;
+        const shipTax = num(g('_order_shipping_tax')) || 0;
+        return {
+          id: r.ID, parentId: r.post_parent || 0, number: g('_order_number') || String(r.ID), orderKey: g('_order_key') || '', createdVia: g('_created_via') || 'checkout',
+          version: g('_order_version') || '', status: STATUS_MAP(r.post_status), currency: g('_order_currency') || 'USD', pricesIncludeTax: yes(g('_prices_include_tax')),
+          discountTotal: num(g('_cart_discount')) || 0, discountTax: num(g('_cart_discount_tax')) || 0, shippingTotal: num(g('_order_shipping')) || 0, shippingTax: shipTax,
+          cartTax: orderTax, total: num(g('_order_total')) || 0, totalTax: orderTax + shipTax,
+          customerId: parseInt(g('_customer_user'), 10) || null, customerIpAddress: g('_customer_ip_address') || '', customerUserAgent: g('_customer_user_agent') || '', customerNote: r.post_excerpt || '',
+          billing: addr('billing'), shipping: addr('shipping'), paymentMethod: g('_payment_method') || '', paymentMethodTitle: g('_payment_method_title') || '', transactionId: g('_transaction_id') || '',
+          datePaid: ts(g('_date_paid')) || ts(g('_paid_date')), dateCompleted: ts(g('_date_completed')) || ts(g('_completed_date')), cartHash: g('_cart_hash') || '',
+          meta: [...publicMeta(m), ...internal(yes(g('_order_stock_reduced')), yes(g('_recorded_sales')), yes(g('_recorded_coupon_usage_counts')))],
+          createdAt: gmt(r.post_date_gmt) || new Date(), updatedAt: gmt(r.post_modified_gmt) || new Date(),
+        };
       });
+      const refundPosts = await q(`SELECT ID, post_parent, post_excerpt, post_date_gmt FROM ${T('posts')} WHERE post_type = 'shop_order_refund' AND post_parent IN (?)`, [ids]);
+      const rm = await metaFor('postmeta', 'post_id', refundPosts.map((r) => r.ID));
+      const refunds = refundPosts.map((r) => {
+        const m = rm.get(r.ID) || new Map();
+        return { id: r.ID, orderId: r.post_parent, amount: Math.abs(num(m.get('_refund_amount')) || 0), reason: m.get('_refund_reason') || r.post_excerpt || '', refundedBy: parseInt(m.get('_refunded_by'), 10) || 0, refundedPayment: yes(m.get('_refunded_payment')), createdAt: gmt(r.post_date_gmt) || new Date() };
+      });
+      await saveBatch(orders, refunds);
     }
   }
-  log(`  ${await insertMany('order', orders)} orders`);
-  const orderIds = new Set(orders.map((o) => o.id));
-  log(`  ${await insertMany('orderRefund', refunds.filter((r) => orderIds.has(r.orderId)))} refunds`);
-  const items = await orderItemsFor([...orderIds]);
-  log(`  ${await insertMany('orderItem', items)} order items`);
-
-  // Order notes (comments of type order_note)
-  const notes = await q(`SELECT comment_ID, comment_post_ID, comment_author, comment_content, comment_date_gmt FROM ${T('comments')} WHERE comment_type = 'order_note'`);
-  const nm = await metaFor('commentmeta', 'comment_id', notes.map((n) => n.comment_ID));
-  log(`  ${await insertMany('orderNote', notes.filter((n) => orderIds.has(n.comment_post_ID)).map((n) => ({
-    id: n.comment_ID, orderId: n.comment_post_ID, note: n.comment_content || '', author: n.comment_author || 'system',
-    customerNote: (nm.get(n.comment_ID) || new Map()).get('is_customer_note') === '1', createdAt: gmt(n.comment_date_gmt) || new Date(),
-  })))} order notes`);
+  log(`  ${counts.orders} new orders, ${counts.items} items, ${counts.refunds} refunds, ${counts.notes} notes (${counts.seen} orders in WordPress)`);
+  // Analytics lookup tables for everything (re)imported
+  log('  building analytics tables…');
+  await rebuildAll(log);
 }
 
 async function migrateContent() {
@@ -743,7 +776,6 @@ async function migrateContent() {
   const { registry } = await loadAcfDefinitions();
   const customTypes = registry.types.map((t) => t.name).filter((n) => /^[a-z0-9_-]{1,20}$/.test(n));
   const customTaxes = registry.taxonomies.map((t) => t.name).filter((n) => !['category', 'post_tag', 'product_cat', 'product_tag', 'product_shipping_class'].includes(n) && !n.startsWith('pa_'));
-  const userIds = new Set((await prisma.user.findMany({ select: { id: true } })).map((u) => u.id));
   const cats = await termsOf('category');
   const tags = await termsOf('post_tag');
   const customTerms = [];
@@ -760,37 +792,50 @@ async function migrateContent() {
   const stickyRow = await q(`SELECT option_value AS v FROM ${T('options')} WHERE option_name = 'sticky_posts'`);
   const sticky = new Set(toArr((stickyRow[0] || {}).v).map(Number));
   const postTypes = ['post', 'page', ...customTypes];
-  const posts = await q(`SELECT ID, post_author, post_title, post_name, post_content, post_excerpt, post_status, post_parent, menu_order, comment_status, ping_status, post_password, post_type, post_date_gmt, post_date, post_modified_gmt FROM ${T('posts')} WHERE post_type IN (?) AND post_status NOT IN ('auto-draft','inherit')`, [postTypes]);
-  const meta = await metaFor('postmeta', 'post_id', posts.map((p) => p.ID));
   const fmtTerms = await termsOf('post_format');
-  const fmtRels = await relationships(fmtTerms.map((t) => t.ttid));
-  const rows = [];
-  for (const p of posts) {
-    const m = meta.get(p.ID) || new Map();
-    const fmt = fmtRels.find((r) => r.obj === p.ID);
-    const fmtTerm = fmt ? fmtTerms.find((t) => t.ttid === fmt.ttid) : null;
-    rows.push({
-      id: p.ID, type: p.post_type, title: p.post_title || '', slug: p.post_name || String(p.ID), content: p.post_content || '', excerpt: p.post_excerpt || '',
-      status: p.post_status, authorId: userIds.has(p.post_author) ? p.post_author : null, parentId: p.post_parent || 0, menuOrder: p.menu_order || 0,
-      featuredMediaId: parseInt(m.get('_thumbnail_id'), 10) || 0, template: m.get('_wp_page_template') === 'default' ? '' : m.get('_wp_page_template') || '',
-      commentStatus: p.comment_status || 'closed', pingStatus: p.ping_status || 'closed', sticky: sticky.has(p.ID),
-      format: fmtTerm ? fmtTerm.slug.replace('post-format-', '') : 'standard', password: p.post_password || '',
-      meta: await contentMeta(m), createdAt: gmt(p.post_date_gmt) || gmt(p.post_date) || new Date(), updatedAt: gmt(p.post_modified_gmt) || new Date(),
-    });
+  const fmtByTtid = new Map(fmtTerms.map((t) => [t.ttid, t]));
+  const termByTtid = new Map([...cats, ...tags, ...customTerms].map((t) => [t.ttid, t.id]));
+  const byType = {};
+  let inserted = 0;
+  let links = 0;
+  progressAt = 0;
+  let seen = 0;
+  for await (const posts of batchesOf(`SELECT ID, post_author, post_title, post_name, post_content, post_excerpt, post_status, post_parent, menu_order, comment_status, ping_status, post_password, post_type, post_date_gmt, post_date, post_modified_gmt FROM ${T('posts')} WHERE post_type IN (?) AND post_status NOT IN ('auto-draft','inherit')`, [postTypes], 'ID')) {
+    const ids = posts.map((x) => x.ID);
+    const meta = await metaFor('postmeta', 'post_id', ids);
+    const rels = await relationshipsOf(ids);
+    const authors = await existingIds('user', posts.map((x) => x.post_author));
+    const rows = [];
+    for (const x of posts) {
+      const m = meta.get(x.ID) || new Map();
+      const fmt = rels.find((r) => r.obj === x.ID && fmtByTtid.has(r.ttid));
+      const fmtTerm = fmt ? fmtByTtid.get(fmt.ttid) : null;
+      rows.push({
+        id: x.ID, type: x.post_type, title: x.post_title || '', slug: x.post_name || String(x.ID), content: x.post_content || '', excerpt: x.post_excerpt || '',
+        status: x.post_status, authorId: authors.has(x.post_author) ? x.post_author : null, parentId: x.post_parent || 0, menuOrder: x.menu_order || 0,
+        featuredMediaId: parseInt(m.get('_thumbnail_id'), 10) || 0, template: m.get('_wp_page_template') === 'default' ? '' : m.get('_wp_page_template') || '',
+        commentStatus: x.comment_status || 'closed', pingStatus: x.ping_status || 'closed', sticky: sticky.has(x.ID),
+        format: fmtTerm ? fmtTerm.slug.replace('post-format-', '') : 'standard', password: x.post_password || '',
+        meta: await contentMeta(m), createdAt: gmt(x.post_date_gmt) || gmt(x.post_date) || new Date(), updatedAt: gmt(x.post_modified_gmt) || new Date(),
+      });
+      byType[x.post_type] = (byType[x.post_type] || 0) + 1;
+    }
+    inserted += await insertMany('post', rows);
+    links += await linkMany('_PostToTerm', 'Post', rels.filter((r) => termByTtid.has(r.ttid)).map((r) => [r.obj, termByTtid.get(r.ttid)]));
+    seen += posts.length;
+    progress('posts', seen);
   }
-  const byType = rows.reduce((acc, r) => ({ ...acc, [r.type]: (acc[r.type] || 0) + 1 }), {});
-  log(`  ${await insertMany('post', rows)} new posts (${Object.entries(byType).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'})`);
-  const rels = await relationships([...cats, ...tags, ...customTerms].map((t) => t.ttid));
-  const ttid = new Map([...cats, ...tags, ...customTerms].map((t) => [t.ttid, t.id]));
-  const postIds = new Set(rows.map((r) => r.id));
-  log(`  ${await linkMany('_PostToTerm', 'Post', rels.filter((r) => postIds.has(r.obj)).map((r) => [r.obj, ttid.get(r.ttid)]))} term links`);
+  log(`  ${inserted} new posts (${Object.entries(byType).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'}), ${links} term links`);
 
-  const comments = await q(`SELECT * FROM ${T('comments')} WHERE comment_type IN ('','comment') AND comment_post_ID IN (SELECT ID FROM ${T('posts')} WHERE post_type IN ('post','page'))`);
-  log(`  ${await insertMany('comment', comments.map((c) => ({
-    id: c.comment_ID, postId: c.comment_post_ID, parentId: c.comment_parent || 0, authorId: c.user_id || 0, authorName: c.comment_author || '',
-    authorEmail: c.comment_author_email || '', authorUrl: c.comment_author_url || '', content: c.comment_content || '',
-    status: { 1: 'approved', 0: 'hold', spam: 'spam', trash: 'trash' }[String(c.comment_approved)] || 'hold', createdAt: gmt(c.comment_date_gmt) || new Date(),
-  })))} comments`);
+  let nComments = 0;
+  for await (const comments of batchesOf(`SELECT c.* FROM ${T('comments')} c JOIN ${T('posts')} p ON p.ID = c.comment_post_ID AND p.post_type IN ('post','page') WHERE c.comment_type IN ('','comment')`, [], 'c.comment_ID')) {
+    nComments += await insertMany('comment', comments.map((c) => ({
+      id: c.comment_ID, postId: c.comment_post_ID, parentId: c.comment_parent || 0, authorId: c.user_id || 0, authorName: c.comment_author || '',
+      authorEmail: c.comment_author_email || '', authorUrl: c.comment_author_url || '', content: c.comment_content || '',
+      status: { 1: 'approved', 0: 'hold', spam: 'spam', trash: 'trash' }[String(c.comment_approved)] || 'hold', createdAt: gmt(c.comment_date_gmt) || new Date(),
+    })));
+  }
+  log(`  ${nComments} comments`);
 
   // Menus
   const menus = await termsOf('nav_menu');

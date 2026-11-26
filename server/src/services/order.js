@@ -410,17 +410,24 @@ async function onStatusChange(orderId, from, to, { note = '', silent = false } =
   // Variable parents' stock status must reflect variation stock (after commit)
   const { syncVariableParent } = require('./product');
   for (const id of parents) await syncVariableParent(id);
+  await require('./order-stats').syncOrderSafe(orderId);
 }
 
+// Coupon usage is one CouponUsage row per use (indexed), plus an atomic counter on the coupon
 async function changeCouponUsage(tx, order, delta) {
+  const who = order.customerId ? String(order.customerId) : String((order.billing && order.billing.email) || '').toLowerCase();
   for (const it of order.items.filter((i) => i.type === 'coupon')) {
-    const coupon = await tx.coupon.findUnique({ where: { code: it.code } });
+    const coupon = await tx.coupon.findUnique({ where: { code: it.code }, select: { id: true, usageCount: true } });
     if (!coupon) continue;
-    const usedBy = Array.isArray(coupon.usedBy) ? [...coupon.usedBy] : [];
-    const who = order.customerId ? String(order.customerId) : (order.billing && order.billing.email) || '';
-    if (delta > 0) usedBy.push(who);
-    else { const i = usedBy.indexOf(who); if (i >= 0) usedBy.splice(i, 1); }
-    await tx.coupon.update({ where: { id: coupon.id }, data: { usageCount: Math.max(0, coupon.usageCount + delta), usedBy } });
+    if (delta > 0) {
+      await tx.couponUsage.create({ data: { couponId: coupon.id, usedBy: who, orderId: order.id } });
+      await tx.coupon.update({ where: { id: coupon.id }, data: { usageCount: { increment: 1 } } });
+    } else {
+      const row = await tx.couponUsage.findFirst({ where: { couponId: coupon.id, orderId: order.id } })
+        || await tx.couponUsage.findFirst({ where: { couponId: coupon.id, usedBy: who } });
+      if (row) await tx.couponUsage.delete({ where: { id: row.id } });
+      if (coupon.usageCount > 0) await tx.coupon.update({ where: { id: coupon.id }, data: { usageCount: { decrement: 1 } } });
+    }
   }
 }
 
@@ -510,7 +517,9 @@ async function saveOrder(body, s, existing = null, req = null) {
   }
   if (toStatus !== fromStatus) {
     await prisma.order.update({ where: { id: orderId }, data: { status: toStatus } });
-    await onStatusChange(orderId, fromStatus, toStatus);
+    await onStatusChange(orderId, fromStatus, toStatus); // also refreshes analytics
+  } else {
+    await require('./order-stats').syncOrderSafe(orderId);
   }
   return orderId;
 }

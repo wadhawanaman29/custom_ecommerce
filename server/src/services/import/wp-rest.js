@@ -75,7 +75,13 @@ async function run(opts, log = console.log) {
   const only = opts.only && opts.only.length ? opts.only : PHASES;
   const should = (p) => only.includes(p);
   const t0 = Date.now();
-  const knownMedia = new Set((await prisma.media.findMany({ select: { id: true } })).map((m) => m.id));
+// Per-page lookups against the new DB (never load whole tables into memory)
+  const idsIn = async (model, ids) => {
+    const list = [...new Set(ids.filter(Boolean))];
+    if (!list.length) return new Set();
+    return new Set((await prisma[model].findMany({ where: { id: { in: list } }, select: { id: true } })).map((r) => r.id));
+  };
+  const knownMedia = new Set(); // cache of media IDs confirmed during this run
   const adminId = (await prisma.user.findFirst({ where: { role: 'administrator' }, select: { id: true } }))?.id || null;
 
   // Ensure a media row exists for an image referenced by id/src (downloads it when enabled)
@@ -83,6 +89,7 @@ async function run(opts, log = console.log) {
     if (!img || !img.src) return null;
     const id = parseInt(img.id, 10) || null;
     if (id && knownMedia.has(id)) return id;
+    if (id && await prisma.media.findUnique({ where: { id }, select: { id: true } })) { knownMedia.add(id); return id; }
     const row = await mediaRow({ id, source_url: img.src, title: { rendered: img.name || '' }, alt_text: img.alt || '', date_gmt: createdAt, mime_type: '' });
     if (!row) return null;
     const created = id ? await prisma.media.upsert({ where: { id }, create: row, update: {} }) : await prisma.media.create({ data: row });
@@ -181,6 +188,7 @@ async function run(opts, log = console.log) {
     log('Media…');
     let n = 0;
     await api.each('wp', 'media', {}, async (items, page, pages) => {
+      for (const id of await idsIn('media', items.map((m) => m.id))) knownMedia.add(id);
       for (const m of items) {
         if (knownMedia.has(m.id)) continue;
         const row = await mediaRow(m);
@@ -218,11 +226,12 @@ async function run(opts, log = console.log) {
     log(`  ${cats.length} categories, ${tags} tags, ${classes} shipping classes, ${attrs.length} attributes`);
 
     log('Products…');
-    const existing = new Set((await prisma.product.findMany({ select: { id: true } })).map((p) => p.id));
+    const existing = new Set(); // filled per page
     const shipClasses = new Map((await prisma.shippingClass.findMany()).map((c) => [c.slug, c.id]));
-    const skus = new Set((await prisma.product.findMany({ where: { sku: { not: null } }, select: { sku: true } })).map((p) => p.sku));
+    const skus = new Set(); // SKUs seen in this run; DB checked per product below
     const mapProduct = (p, extra = {}) => {
       let sku = (p.sku || '').trim() || null;
+      if (sku && !skus.has(sku) && p.__skuTaken) skus.add(sku);
       if (sku && skus.has(sku)) { log(`  ! duplicate SKU "${sku}" on #${p.id} — cleared`); sku = null; }
       if (sku) skus.add(sku);
       return {
@@ -246,6 +255,9 @@ async function run(opts, log = console.log) {
     let nProducts = 0;
     let nVariations = 0;
     await api.each('wc', 'products', { status: 'any', orderby: 'id', order: 'asc' }, async (items, page, pages) => {
+      for (const id of await idsIn('product', items.map((p) => p.id))) existing.add(id);
+      const taken = new Map((await prisma.product.findMany({ where: { sku: { in: items.map((p) => (p.sku || '').trim()).filter(Boolean) } }, select: { id: true, sku: true } })).map((r) => [r.sku, r.id]));
+      for (const p of items) if (p.sku && taken.has(p.sku.trim()) && taken.get(p.sku.trim()) !== p.id) p.__skuTaken = true;
       for (const p of items) {
         if (existing.has(p.id)) continue;
         await insert('product', [mapProduct(p, { type: p.type || 'simple', parentId: null })]);
@@ -261,6 +273,9 @@ async function run(opts, log = console.log) {
         await linkM2M('_ProductToTag', 'Product', (p.tags || []).map((t) => [p.id, t.id]));
         if (p.type === 'variable') {
           await api.each('wc', `products/${p.id}/variations`, { status: 'any' }, async (vars) => {
+            for (const id of await idsIn('product', vars.map((v) => v.id))) existing.add(id);
+            const vTaken = new Map((await prisma.product.findMany({ where: { sku: { in: vars.map((v) => (v.sku || '').trim()).filter(Boolean) } }, select: { id: true, sku: true } })).map((r) => [r.sku, r.id]));
+            for (const v of vars) if (v.sku && vTaken.has(v.sku.trim()) && vTaken.get(v.sku.trim()) !== v.id) v.__skuTaken = true;
             for (const v of vars) {
               if (existing.has(v.id)) continue;
               await insert('product', [mapProduct({ ...v, name: v.name || p.name, slug: `${p.slug}-${v.id}`, short_description: '' }, {
@@ -293,8 +308,9 @@ async function run(opts, log = console.log) {
   if (should('coupons') && opts.consumerKey) {
     log('Coupons…');
     let n = 0;
-    const seen = new Set((await prisma.coupon.findMany({ select: { code: true } })).map((c) => c.code));
+    const seen = new Set();
     await api.each('wc', 'coupons', {}, async (items) => {
+      for (const c of await prisma.coupon.findMany({ where: { code: { in: items.map((c) => String(c.code || '').toLowerCase()) } }, select: { code: true } })) seen.add(c.code);
       const rows = items.filter((c) => c.code && !seen.has(c.code.toLowerCase())).map((c) => {
         seen.add(c.code.toLowerCase());
         return {
@@ -346,10 +362,13 @@ async function run(opts, log = console.log) {
   if (should('customers') && opts.consumerKey) {
     log('Customers…');
     let n = 0;
-    const emails = new Set((await prisma.user.findMany({ select: { email: true } })).map((u) => u.email));
-    const logins = new Set((await prisma.user.findMany({ select: { login: true } })).map((u) => u.login));
+    const emails = new Set(); // filled per page from the DB
+    const logins = new Set();
     const placeholderHash = await hashPassword(crypto.randomBytes(24).toString('base64'));
     await api.each('wc', 'customers', { role: 'all', orderby: 'id', order: 'asc' }, async (items, page, pages) => {
+      const pageEmails = items.map((c) => String(c.email || `user${c.id}@invalid.local`).toLowerCase());
+      const pageLogins = items.flatMap((c) => [c.username, String(c.email || '').split('@')[0], `${c.username}${c.id}`]).filter(Boolean);
+      for (const u of await prisma.user.findMany({ where: { OR: [{ email: { in: pageEmails } }, { login: { in: pageLogins } }] }, select: { email: true, login: true } })) { emails.add(u.email); logins.add(u.login); }
       const rows = [];
       for (const c of items) {
         const email = String(c.email || `user${c.id}@invalid.local`).toLowerCase();
@@ -373,11 +392,14 @@ async function run(opts, log = console.log) {
   // ── Orders ──
   if (should('orders') && opts.consumerKey) {
     log('Orders…');
-    const users = new Set((await prisma.user.findMany({ select: { id: true } })).map((u) => u.id));
-    const existingOrders = new Set((await prisma.order.findMany({ select: { id: true } })).map((o) => o.id));
+    const { billingCols, rebuildAll } = require('../order-stats');
+    let users = new Set();
+    let existingOrders = new Set();
     let n = 0;
     const taxes = (list, sub) => (Array.isArray(list) ? list.map((t) => ({ id: t.id, total: String(t.total ?? ''), subtotal: sub ? String(t.subtotal ?? '') : '' })) : []);
     await api.each('wc', 'orders', { status: 'any', orderby: 'id', order: 'asc' }, async (items, page, pages) => {
+      users = await idsIn('user', items.map((o) => o.customer_id));
+      existingOrders = await idsIn('order', items.map((o) => o.id));
       for (const o of items) {
         if (existingOrders.has(o.id)) continue;
         const total = (k) => num(o[k]) || 0;
@@ -387,7 +409,7 @@ async function run(opts, log = console.log) {
           discountTotal: total('discount_total'), discountTax: total('discount_tax'), shippingTotal: total('shipping_total'), shippingTax: total('shipping_tax'),
           cartTax: total('cart_tax'), total: total('total'), totalTax: total('total_tax'),
           customerId: users.has(o.customer_id) ? o.customer_id : null, customerIpAddress: o.customer_ip_address || '', customerUserAgent: o.customer_user_agent || '',
-          customerNote: o.customer_note || '', billing: o.billing || {}, shipping: o.shipping || {}, paymentMethod: o.payment_method || '',
+          customerNote: o.customer_note || '', billing: o.billing || {}, shipping: o.shipping || {}, ...billingCols(o.billing), paymentMethod: o.payment_method || '',
           paymentMethodTitle: o.payment_method_title || '', transactionId: o.transaction_id || '', datePaid: dt(o.date_paid, o.date_paid_gmt),
           dateCompleted: dt(o.date_completed, o.date_completed_gmt), cartHash: o.cart_hash || '',
           // Imported orders already affected stock/sales on the old site
@@ -419,6 +441,8 @@ async function run(opts, log = console.log) {
       }
       log(`  page ${page}/${pages} — ${n} orders`);
     });
+    log('  building analytics tables…');
+    await rebuildAll(log);
   }
 
   // ── WordPress content ──
@@ -432,7 +456,7 @@ async function run(opts, log = console.log) {
         terms += await insert('term', items.map((t) => ({ id: t.id, taxonomy, name: t.name, slug: t.slug, description: t.description || '', parentId: t.parent || 0 })));
       });
     }
-    const users = new Set((await prisma.user.findMany({ select: { id: true } })).map((u) => u.id));
+    const users = new Set();
     if (api.hasWpAuth) {
       // Staff users (authors/editors/admins) — customers came from wc/v3/customers
       await api.each('wp', 'users', { context: 'edit', roles: 'administrator,editor,author,contributor,shop_manager' }, async (items) => {
@@ -448,6 +472,7 @@ async function run(opts, log = console.log) {
     let posts = 0;
     for (const type of ['posts', 'pages']) {
       await api.each('wp', type, { ...ctx, ...status, orderby: 'id', order: 'asc' }, async (items) => {
+        for (const id of await idsIn('user', items.map((p) => p.author))) users.add(id);
         for (const p of items) {
           const raw = p.content && p.content.raw !== undefined;
           const featured = p.featured_media || 0;

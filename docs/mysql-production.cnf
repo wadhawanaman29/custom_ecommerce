@@ -1,0 +1,55 @@
+# MySQL 8.0 / MariaDB 10.11 settings for the store database (10 GB+).
+# Put in /etc/mysql/conf.d/store.cnf (Linux) and restart MySQL.
+# Values assume a dedicated DB server with 16 GB RAM — scale innodb_buffer_pool_size to ~60–70% of RAM.
+# (XAMPP's default buffer pool is 16 MB: fine for development, far too small for production data.)
+
+[mysqld]
+# ── Memory: keep the working set (indexes + hot rows) in RAM ──
+innodb_buffer_pool_size        = 10G
+innodb_buffer_pool_instances   = 8
+innodb_log_buffer_size         = 64M
+
+# ── Redo log: large enough for bursts of order writes / imports ──
+# MySQL 8.0.30+:
+innodb_redo_log_capacity       = 2G
+# Older MySQL / MariaDB instead:
+# innodb_log_file_size         = 1G
+
+# ── Durability vs. speed ──
+# 1 = fully durable (recommended for orders). 2 only if you accept losing ~1 s of writes on a crash.
+innodb_flush_log_at_trx_commit = 1
+innodb_flush_method            = O_DIRECT
+innodb_file_per_table          = 1
+
+# ── I/O (SSD/NVMe) ──
+innodb_io_capacity             = 2000
+innodb_io_capacity_max         = 4000
+
+# ── Connections: Node uses a pool (connection_limit in DATABASE_URL) ──
+# total = (connection_limit × number of Node processes) + admin headroom
+max_connections                = 300
+wait_timeout                   = 600
+
+# ── Per-query memory (keep modest; many concurrent queries) ──
+tmp_table_size                 = 128M
+max_heap_table_size            = 128M
+sort_buffer_size               = 4M
+join_buffer_size               = 4M
+
+# ── Full-text search (product / post / customer / order search) ──
+innodb_ft_min_token_size       = 3
+
+# ── Find slow queries before customers do ──
+slow_query_log                 = 1
+slow_query_log_file            = /var/log/mysql/slow.log
+long_query_time                = 0.5
+log_queries_not_using_indexes  = 0
+
+# ── Character set (emoji-safe) ──
+character-set-server           = utf8mb4
+collation-server               = utf8mb4_unicode_ci
+
+# ── Binary log: needed for point-in-time recovery and replicas ──
+log_bin                        = mysql-bin
+binlog_expire_logs_seconds     = 604800
+server_id                      = 1

@@ -45,7 +45,10 @@ users.get('/', ah(async (req, res) => {
   if (c.include) where.id = { in: c.include };
   if (c.exclude) where.id = { ...(where.id || {}), notIn: c.exclude };
   if (q.slug) where.nicename = { in: strList(q.slug) };
-  if (c.search) where.OR = [{ displayName: { contains: c.search } }, { login: { contains: c.search } }, ...(canList ? [{ email: { contains: c.search } }] : [])];
+  if (c.search) {
+    const sw = await require('../../lib/search').searchWhere('User', ['email', 'login', 'firstName', 'lastName', 'displayName'], c.search, ['login', ...(canList ? ['email'] : [])]);
+    if (sw) where.AND = [sw];
+  }
   const orderBy = c.orderby === 'id' ? { id: c.order } : c.orderby === 'registered_date' ? { createdAt: c.order } : c.orderby === 'email' && canList ? { email: c.order } : { displayName: c.order };
   const [total, rows] = await Promise.all([prisma.user.count({ where }), prisma.user.findMany({ where, orderBy, skip: c.skip, take: c.take })]);
   setPaginationHeaders(req, res, total, c);

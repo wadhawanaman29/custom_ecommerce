@@ -12,6 +12,8 @@ const {
   productInclude, variationInclude, serializeProducts, serializeVariation,
 } = require('../../serializers/product');
 const svc = require('../../services/product');
+const { searchWhere } = require('../../lib/search');
+const { countOf } = require('../../lib/cache');
 
 const router = express.Router();
 
@@ -90,7 +92,9 @@ async function buildProductWhere(req, s) {
   if (!staff && s.hideOutOfStock && !q.stock_status) where.stockStatus = { not: 'outofstock' };
   if (q.search) {
     const term = String(q.search);
-    where.OR = [{ name: { contains: term } }, { sku: { contains: term } }, { shortDescription: { contains: term } }];
+    // FULLTEXT on name/SKU + SKU prefix (index) — no LIKE '%term%' table scans
+    const sw = await searchWhere('Product', ['name', 'sku'], term, ['sku']);
+    if (sw) where.AND = [...(where.AND || []), sw];
   }
   if (q.attribute) {
     const slug = String(q.attribute).replace(/^pa_/, '');
@@ -127,7 +131,7 @@ router.get('/', publicRead('read'), cached(), ah(async (req, res) => {
   if (c.exclude) where.id = { ...(where.id || {}), notIn: c.exclude };
 
   const [total, rows] = await Promise.all([
-    prisma.product.count({ where }),
+    countOf('product', where),
     prisma.product.findMany({ where, include: productInclude, orderBy: orderByFor(c.orderby, c.order), skip: c.skip, take: c.take }),
   ]);
   if (c.orderby === 'include' && c.include) rows.sort((a, b) => c.include.indexOf(a.id) - c.include.indexOf(b.id));

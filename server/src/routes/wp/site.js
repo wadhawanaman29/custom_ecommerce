@@ -213,11 +213,13 @@ search.get('/', cached(), ah(async (req, res) => {
   if (type === 'post' && term) {
     const sub = req.query.subtype && req.query.subtype !== 'any' ? String(req.query.subtype).split(',') : ['post', 'page', 'product'];
     if (sub.includes('post') || sub.includes('page')) {
-      const rows = await prisma.post.findMany({ where: { status: 'publish', type: { in: sub.filter((x) => x !== 'product') }, OR: [{ title: { contains: term } }, { content: { contains: term } }] }, take: perPage, orderBy: { createdAt: 'desc' } });
+      const sw = await require('../../lib/search').searchWhere('Post', ['title', 'content'], term, ['slug']);
+      const rows = await prisma.post.findMany({ where: { status: 'publish', type: { in: sub.filter((x) => x !== 'product') }, ...(sw || {}) }, take: perPage, orderBy: { createdAt: 'desc' } });
       out.push(...rows.map((p) => ({ id: p.id, title: p.title, url: `${config.frontendUrl}/${p.slug}/`, type: 'post', subtype: p.type })));
     }
     if (sub.includes('product')) {
-      const rows = await prisma.product.findMany({ where: { status: 'publish', type: { not: 'variation' }, OR: [{ name: { contains: term } }, { sku: { contains: term } }] }, take: perPage });
+      const sw = await require('../../lib/search').searchWhere('Product', ['name', 'sku'], term, ['sku']);
+      const rows = await prisma.product.findMany({ where: { status: 'publish', type: { not: 'variation' }, ...(sw || {}) }, take: perPage });
       out.push(...rows.map((p) => ({ id: p.id, title: p.name, url: `${config.frontendUrl}/product/${p.slug}/`, type: 'post', subtype: 'product' })));
     }
   }

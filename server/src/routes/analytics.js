@@ -5,6 +5,10 @@
 //   net sales   = gross − returns − coupons
 //   total sales = net sales + taxes + shipping
 // Orders with an "excluded" status (default: pending, failed, cancelled) are ignored, like WC.
+//
+// Scale: every report reads the narrow lookup tables (OrderStats, OrderProductLookup,
+// OrderCouponLookup) through (status/createdAt) indexes and aggregates in SQL, so result size
+// depends on the number of days/products/coupons — never on the number of orders.
 const express = require('express');
 const prisma = require('../db');
 const { ah, badRequest } = require('../lib/http');
@@ -19,12 +23,16 @@ const ALWAYS_EXCLUDED = ['trash', 'checkout-draft'];
 const n = (v) => (v === null || v === undefined ? 0 : Number(v));
 const r2 = (v) => Math.round(n(v) * 100) / 100;
 
+async function excludedStatuses() {
+  let excluded = await options.getOption('woocommerce_excluded_report_order_statuses', DEFAULT_EXCLUDED);
+  if (!Array.isArray(excluded)) excluded = DEFAULT_EXCLUDED;
+  return [...new Set([...excluded.map((x) => String(x).replace(/^wc-/, '')), ...ALWAYS_EXCLUDED])];
+}
+
 async function context(req) {
   const s = await options.store();
   const offsetMin = Math.round((s.gmtOffset || 0) * 60);
-  let excluded = await options.getOption('woocommerce_excluded_report_order_statuses', DEFAULT_EXCLUDED);
-  if (!Array.isArray(excluded)) excluded = DEFAULT_EXCLUDED;
-  const statuses = [...new Set([...excluded.map((x) => String(x).replace(/^wc-/, '')), ...ALWAYS_EXCLUDED])];
+  const statuses = await excludedStatuses();
   const parse = (v, name) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v || ''))) throw badRequest('rest_invalid_param', `Invalid parameter(s): ${name} (YYYY-MM-DD)`);
     return v;
@@ -38,41 +46,40 @@ async function context(req) {
   return { s, offsetMin, statuses, after, before, start, end };
 }
 const inList = (arr) => arr.map(() => '?').join(',');
+const range = (ctx, alias) => `${alias}.createdAt >= ? AND ${alias}.createdAt < ? AND ${alias}.status NOT IN (${inList(ctx.statuses)})`;
+const rangeParams = (ctx) => [ctx.start, ctx.end, ...ctx.statuses];
 
-// Daily aggregates for orders, refunds and items in [start, end)
+// Daily aggregates from OrderStats + refunds
 async function daily(ctx) {
-  const { offsetMin, statuses, start, end } = ctx;
-  const ex = inList(statuses);
-  const [orders, refunds, items] = await Promise.all([
+  const [orders, refunds] = await Promise.all([
     prisma.$queryRawUnsafe(`
-      SELECT DATE(DATE_ADD(o.createdAt, INTERVAL ? MINUTE)) AS d, COUNT(*) AS orders_count,
-        SUM(o.total - o.totalTax - o.shippingTotal) AS net_total, SUM(o.discountTotal) AS coupons,
-        SUM(o.totalTax) AS taxes, SUM(o.shippingTotal) AS shipping,
-        SUM(CASE WHEN o.discountTotal > 0 THEN 1 ELSE 0 END) AS discounted_orders
-      FROM \`Order\` o
-      WHERE o.createdAt >= ? AND o.createdAt < ? AND o.status NOT IN (${ex})
-      GROUP BY d`, offsetMin, start, end, ...statuses),
+      SELECT DATE(DATE_ADD(s.createdAt, INTERVAL ? MINUTE)) AS d, COUNT(*) AS orders_count,
+        SUM(s.netTotal) AS net_total, SUM(s.discountTotal) AS coupons, SUM(s.taxTotal) AS taxes, SUM(s.shippingTotal) AS shipping,
+        SUM(s.numItemsSold) AS items, SUM(CASE WHEN s.discountTotal > 0 THEN 1 ELSE 0 END) AS discounted_orders,
+        SUM(CASE WHEN s.returningCustomer = 0 THEN 1 ELSE 0 END) AS new_customers
+      FROM OrderStats s
+      WHERE ${range(ctx, 's')}
+      GROUP BY d`, ctx.offsetMin, ...rangeParams(ctx)),
     prisma.$queryRawUnsafe(`
       SELECT DATE(DATE_ADD(r.createdAt, INTERVAL ? MINUTE)) AS d, SUM(r.amount) AS refunds
-      FROM OrderRefund r JOIN \`Order\` o ON o.id = r.orderId
-      WHERE r.createdAt >= ? AND r.createdAt < ? AND o.status NOT IN (${ex})
-      GROUP BY d`, offsetMin, start, end, ...statuses),
-    prisma.$queryRawUnsafe(`
-      SELECT DATE(DATE_ADD(o.createdAt, INTERVAL ? MINUTE)) AS d, SUM(oi.quantity) AS items
-      FROM OrderItem oi JOIN \`Order\` o ON o.id = oi.orderId
-      WHERE oi.type = 'line_item' AND o.createdAt >= ? AND o.createdAt < ? AND o.status NOT IN (${ex})
-      GROUP BY d`, offsetMin, start, end, ...statuses),
+      FROM OrderRefund r JOIN OrderStats s ON s.orderId = r.orderId
+      WHERE r.createdAt >= ? AND r.createdAt < ? AND s.status NOT IN (${inList(ctx.statuses)})
+      GROUP BY d`, ctx.offsetMin, ...rangeParams(ctx)),
   ]);
   const key = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10));
   const map = new Map();
   const get = (d) => {
     const k = key(d);
-    if (!map.has(k)) map.set(k, { orders_count: 0, net_total: 0, coupons: 0, taxes: 0, shipping: 0, refunds: 0, items: 0, discounted_orders: 0 });
+    if (!map.has(k)) map.set(k, { orders_count: 0, net_total: 0, coupons: 0, taxes: 0, shipping: 0, refunds: 0, items: 0, discounted_orders: 0, new_customers: 0 });
     return map.get(k);
   };
-  for (const o of orders) Object.assign(get(o.d), { orders_count: n(o.orders_count), net_total: n(o.net_total), coupons: n(o.coupons), taxes: n(o.taxes), shipping: n(o.shipping), discounted_orders: n(o.discounted_orders) });
+  for (const o of orders) {
+    Object.assign(get(o.d), {
+      orders_count: n(o.orders_count), net_total: n(o.net_total), coupons: n(o.coupons), taxes: n(o.taxes), shipping: n(o.shipping),
+      items: n(o.items), discounted_orders: n(o.discounted_orders), new_customers: n(o.new_customers),
+    });
+  }
   for (const r of refunds) get(r.d).refunds = n(r.refunds);
-  for (const i of items) get(i.d).items = n(i.items);
   return map;
 }
 
@@ -92,12 +99,13 @@ function finish(x) {
     avg_order_value: x.orders_count ? r2(x.net_total / x.orders_count) : 0,
     avg_items_per_order: x.orders_count ? Math.round((x.items / x.orders_count) * 100) / 100 : 0,
     discounted_orders: x.discounted_orders,
+    new_customers: x.new_customers,
   };
 }
 const sum = (list) => list.reduce((a, b) => {
   for (const k of Object.keys(b)) a[k] = (a[k] || 0) + b[k];
   return a;
-}, { orders_count: 0, net_total: 0, coupons: 0, taxes: 0, shipping: 0, refunds: 0, items: 0, discounted_orders: 0 });
+}, { orders_count: 0, net_total: 0, coupons: 0, taxes: 0, shipping: 0, refunds: 0, items: 0, discounted_orders: 0, new_customers: 0 });
 
 // Bucket start for an interval (dates are YYYY-MM-DD strings, local)
 function bucket(dateStr, interval) {
@@ -128,7 +136,7 @@ router.get('/revenue', ah(async (req, res) => {
   res.json({ currency: ctx.s.currency, interval, totals: finish(sum([...map.values()])), intervals });
 }));
 
-// Orders report: paginated list with customer type + products
+// Orders report: paginated list (index: OrderStats/Order status+createdAt)
 router.get('/orders', ah(async (req, res) => {
   const ctx = await context(req);
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -137,37 +145,26 @@ router.get('/orders', ah(async (req, res) => {
   const sortMap = { date: { createdAt: order }, order_number: { id: order }, net_total: { total: order }, status: { status: order } };
   const where = { createdAt: { gte: ctx.start, lt: ctx.end }, status: { notIn: ctx.statuses } };
   if (req.query.status && req.query.status !== 'all') where.status = String(req.query.status);
+  const { countOf } = require('../lib/cache');
   const [total, rows] = await Promise.all([
-    prisma.order.count({ where }),
-    prisma.order.findMany({ where, orderBy: sortMap[req.query.orderby] || { createdAt: 'desc' }, skip: (page - 1) * perPage, take: perPage, include: { items: { where: { type: { in: ['line_item', 'coupon'] } } } } }),
+    countOf('order', where),
+    prisma.order.findMany({
+      where, orderBy: sortMap[req.query.orderby] || { createdAt: 'desc' }, skip: (page - 1) * perPage, take: perPage,
+      include: { items: { where: { type: { in: ['line_item', 'coupon'] } } }, stats: { select: { returningCustomer: true } } },
+    }),
   ]);
-  // New vs returning: is this the customer's first counted order?
-  const custIds = [...new Set(rows.map((o) => o.customerId).filter(Boolean))];
-  const emails = [...new Set(rows.filter((o) => !o.customerId).map((o) => (o.billing && o.billing.email) || '').filter(Boolean))];
-  const firstById = new Map();
-  if (custIds.length) {
-    const firsts = await prisma.order.groupBy({ by: ['customerId'], where: { customerId: { in: custIds }, status: { notIn: ctx.statuses } }, _min: { id: true } });
-    for (const f of firsts) firstById.set(f.customerId, f._min.id);
-  }
-  const firstByEmail = new Map();
-  for (const e of emails) {
-    const f = await prisma.order.findFirst({ where: { customerId: null, status: { notIn: ctx.statuses }, billing: { path: '$.email', equals: e } }, orderBy: { id: 'asc' }, select: { id: true } });
-    if (f) firstByEmail.set(e, f.id);
-  }
   res.set('X-WP-Total', String(total));
   res.set('X-WP-TotalPages', String(Math.ceil(total / perPage)));
   res.json(rows.map((o) => {
     const lines = o.items.filter((i) => i.type === 'line_item');
-    const email = (o.billing && o.billing.email) || '';
-    const first = o.customerId ? firstById.get(o.customerId) : firstByEmail.get(email);
     return {
       order_id: o.id,
       order_number: o.number || String(o.id),
       date_created: o.createdAt,
       status: o.status,
       customer_id: o.customerId || 0,
-      customer_name: [o.billing && o.billing.first_name, o.billing && o.billing.last_name].filter(Boolean).join(' ') || email || 'Guest',
-      customer_type: first === o.id ? 'new' : 'returning',
+      customer_name: o.billingName || o.billingEmail || 'Guest',
+      customer_type: o.stats && o.stats.returningCustomer ? 'returning' : 'new',
       products: lines.map((l) => ({ id: l.productId, name: l.name, quantity: l.quantity })),
       num_items_sold: lines.reduce((a, l) => a + l.quantity, 0),
       coupons: o.items.filter((i) => i.type === 'coupon').map((c) => c.code),
@@ -176,44 +173,39 @@ router.get('/orders', ah(async (req, res) => {
   }));
 }));
 
-// Line-item rows (orderId, productId, variationId, quantity, total) in the range
-async function lineItems(ctx) {
-  return prisma.$queryRawUnsafe(`
-    SELECT oi.orderId AS orderId, oi.productId AS productId, oi.variationId AS variationId, oi.quantity AS quantity, oi.total AS total, oi.name AS name
-    FROM OrderItem oi JOIN \`Order\` o ON o.id = oi.orderId
-    WHERE oi.type = 'line_item' AND o.createdAt >= ? AND o.createdAt < ? AND o.status NOT IN (${inList(ctx.statuses)})`, ctx.start, ctx.end, ...ctx.statuses);
-}
-
-// Products (or variations with ?type=variations)
+// Products (or variations with ?type=variations): one row per product, aggregated in SQL
 router.get('/products', ah(async (req, res) => {
   const ctx = await context(req);
   const variations = req.query.type === 'variations';
-  const rows = await lineItems(ctx);
-  const agg = new Map();
-  for (const r of rows) {
-    const id = Number(variations ? r.variationId : r.productId);
-    if (!id) continue;
-    if (!agg.has(id)) agg.set(id, { id, items_sold: 0, net_revenue: 0, orders: new Set(), name: r.name });
-    const a = agg.get(id);
-    a.items_sold += Number(r.quantity);
-    a.net_revenue += n(r.total);
-    a.orders.add(Number(r.orderId));
+  const col = variations ? 'l.variationId' : 'l.productId';
+  const [rows, [totals]] = await Promise.all([
+    prisma.$queryRawUnsafe(`
+      SELECT ${col} AS id, SUM(l.quantity) AS items_sold, SUM(l.netRevenue) AS net_revenue, COUNT(DISTINCT l.orderId) AS orders_count
+      FROM OrderProductLookup l WHERE ${range(ctx, 'l')} ${variations ? 'AND l.variationId > 0' : ''}
+      GROUP BY ${col}`, ...rangeParams(ctx)),
+    prisma.$queryRawUnsafe(`
+      SELECT COUNT(DISTINCT l.orderId) AS orders_count FROM OrderProductLookup l WHERE ${range(ctx, 'l')} ${variations ? 'AND l.variationId > 0' : ''}`, ...rangeParams(ctx)),
+  ]);
+  const ids = rows.map((r) => Number(r.id));
+  const products = [];
+  for (let i = 0; i < ids.length; i += 1000) {
+    products.push(...await prisma.product.findMany({
+      where: { id: { in: ids.slice(i, i + 1000) } },
+      select: { id: true, name: true, sku: true, stockStatus: true, stockQuantity: true, manageStock: true, parentId: true, variationAttributes: true, categories: { select: { id: true, name: true } }, parent: { select: { name: true, categories: { select: { id: true, name: true } } } } },
+    }));
   }
-  const products = await prisma.product.findMany({
-    where: { id: { in: [...agg.keys()] } },
-    select: { id: true, name: true, sku: true, stockStatus: true, stockQuantity: true, manageStock: true, parentId: true, variationAttributes: true, categories: { select: { id: true, name: true } }, parent: { select: { name: true, categories: { select: { id: true, name: true } } } } },
-  });
   const byId = new Map(products.map((p) => [p.id, p]));
-  const out = [...agg.values()].map((a) => {
-    const p = byId.get(a.id);
+  const out = rows.map((a) => {
+    const id = Number(a.id);
+    const p = byId.get(id);
     return {
-      product_id: variations ? (p && p.parentId) || 0 : a.id,
-      variation_id: variations ? a.id : 0,
-      name: p ? (variations && p.parent ? `${p.parent.name} – ${(p.variationAttributes || []).map((x) => x.option || 'Any').join(', ')}` : p.name) : `${a.name} (deleted)`,
+      product_id: variations ? (p && p.parentId) || 0 : id,
+      variation_id: variations ? id : 0,
+      name: p ? (variations && p.parent ? `${p.parent.name} – ${(p.variationAttributes || []).map((x) => x.option || 'Any').join(', ')}` : p.name) : `#${id} (deleted)`,
       sku: p ? p.sku || '' : '',
-      items_sold: a.items_sold,
+      items_sold: n(a.items_sold),
       net_revenue: r2(a.net_revenue),
-      orders_count: a.orders.size,
+      orders_count: n(a.orders_count),
       categories: p ? (p.parentId && p.parent ? p.parent.categories : p.categories).map((c) => c.name) : [],
       stock_status: p ? p.stockStatus : '',
       stock_quantity: p && p.manageStock ? p.stockQuantity : null,
@@ -223,31 +215,28 @@ router.get('/products', ah(async (req, res) => {
     totals: {
       items_sold: out.reduce((x, o) => x + o.items_sold, 0),
       net_revenue: r2(out.reduce((x, o) => x + o.net_revenue, 0)),
-      orders_count: new Set(rows.filter((r) => (variations ? r.variationId : r.productId)).map((r) => Number(r.orderId))).size,
+      orders_count: n(totals && totals.orders_count),
       products_count: out.length,
     },
     rows: out,
   });
 }));
 
+// Categories: lookup rows joined to the product↔category link table (A = product, B = category)
 router.get('/categories', ah(async (req, res) => {
   const ctx = await context(req);
-  const rows = await lineItems(ctx);
-  const pids = [...new Set(rows.map((r) => Number(r.productId)).filter(Boolean))];
-  const products = await prisma.product.findMany({ where: { id: { in: pids } }, select: { id: true, categories: { select: { id: true, name: true } } } });
-  const catsOf = new Map(products.map((p) => [p.id, p.categories]));
-  const agg = new Map();
-  for (const r of rows) {
-    for (const c of catsOf.get(Number(r.productId)) || []) {
-      if (!agg.has(c.id)) agg.set(c.id, { category_id: c.id, name: c.name, items_sold: 0, net_revenue: 0, products: new Set(), orders: new Set() });
-      const a = agg.get(c.id);
-      a.items_sold += Number(r.quantity);
-      a.net_revenue += n(r.total);
-      a.products.add(Number(r.productId));
-      a.orders.add(Number(r.orderId));
-    }
-  }
-  const out = [...agg.values()].map((a) => ({ category_id: a.category_id, name: a.name, items_sold: a.items_sold, net_revenue: r2(a.net_revenue), products_count: a.products.size, orders_count: a.orders.size }));
+  const rows = await prisma.$queryRawUnsafe(`
+    SELECT pc.B AS category_id, SUM(l.quantity) AS items_sold, SUM(l.netRevenue) AS net_revenue,
+      COUNT(DISTINCT l.productId) AS products_count, COUNT(DISTINCT l.orderId) AS orders_count
+    FROM OrderProductLookup l JOIN _ProductToCategory pc ON pc.A = l.productId
+    WHERE ${range(ctx, 'l')}
+    GROUP BY pc.B`, ...rangeParams(ctx));
+  const cats = await prisma.productCategory.findMany({ where: { id: { in: rows.map((r) => Number(r.category_id)) } }, select: { id: true, name: true } });
+  const names = new Map(cats.map((c) => [c.id, c.name]));
+  const out = rows.map((r) => ({
+    category_id: Number(r.category_id), name: names.get(Number(r.category_id)) || `#${r.category_id}`, items_sold: n(r.items_sold),
+    net_revenue: r2(r.net_revenue), products_count: n(r.products_count), orders_count: n(r.orders_count),
+  }));
   res.json({
     totals: { items_sold: out.reduce((x, o) => x + o.items_sold, 0), net_revenue: r2(out.reduce((x, o) => x + o.net_revenue, 0)), categories_count: out.length },
     rows: out,
@@ -257,10 +246,9 @@ router.get('/categories', ah(async (req, res) => {
 router.get('/coupons', ah(async (req, res) => {
   const ctx = await context(req);
   const rows = await prisma.$queryRawUnsafe(`
-    SELECT oi.code AS code, COUNT(DISTINCT oi.orderId) AS orders_count, SUM(oi.discount) AS amount
-    FROM OrderItem oi JOIN \`Order\` o ON o.id = oi.orderId
-    WHERE oi.type = 'coupon' AND o.createdAt >= ? AND o.createdAt < ? AND o.status NOT IN (${inList(ctx.statuses)})
-    GROUP BY oi.code`, ctx.start, ctx.end, ...ctx.statuses);
+    SELECT c.code AS code, COUNT(*) AS orders_count, SUM(c.discount) AS amount
+    FROM OrderCouponLookup c WHERE ${range(ctx, 'c')}
+    GROUP BY c.code`, ...rangeParams(ctx));
   const coupons = await prisma.coupon.findMany({ where: { code: { in: rows.map((r) => r.code) } } });
   const byCode = new Map(coupons.map((c) => [c.code, c]));
   const out = rows.map((r) => {
@@ -270,14 +258,15 @@ router.get('/coupons', ah(async (req, res) => {
   res.json({ totals: { coupons_count: out.length, orders_count: out.reduce((x, o) => x + o.orders_count, 0), amount: r2(out.reduce((x, o) => x + o.amount, 0)) }, rows: out });
 }));
 
+// Taxes: tax items of orders in range (OrderItem (orderId, type) index + OrderStats range)
 router.get('/taxes', ah(async (req, res) => {
   const ctx = await context(req);
   const rows = await prisma.$queryRawUnsafe(`
     SELECT oi.rateCode AS tax_code, oi.rateId AS tax_rate_id, MAX(oi.ratePercent) AS rate, SUM(oi.total) AS order_tax,
       SUM(oi.shippingTaxTotal) AS shipping_tax, COUNT(DISTINCT oi.orderId) AS orders_count
-    FROM OrderItem oi JOIN \`Order\` o ON o.id = oi.orderId
-    WHERE oi.type = 'tax' AND o.createdAt >= ? AND o.createdAt < ? AND o.status NOT IN (${inList(ctx.statuses)})
-    GROUP BY oi.rateCode, oi.rateId`, ctx.start, ctx.end, ...ctx.statuses);
+    FROM OrderStats s JOIN OrderItem oi ON oi.orderId = s.orderId AND oi.type = 'tax'
+    WHERE ${range(ctx, 's')}
+    GROUP BY oi.rateCode, oi.rateId`, ...rangeParams(ctx));
   const out = rows.map((r) => ({ tax_rate_id: Number(r.tax_rate_id) || 0, tax_code: r.tax_code, rate: n(r.rate), order_tax: r2(r.order_tax), shipping_tax: r2(r.shipping_tax), total_tax: r2(n(r.order_tax) + n(r.shipping_tax)), orders_count: Number(r.orders_count) }));
   res.json({ totals: { total_tax: r2(out.reduce((x, o) => x + o.total_tax, 0)), order_tax: r2(out.reduce((x, o) => x + o.order_tax, 0)), shipping_tax: r2(out.reduce((x, o) => x + o.shipping_tax, 0)), orders_count: out.reduce((x, o) => x + o.orders_count, 0) }, rows: out });
 }));
@@ -323,42 +312,45 @@ router.get('/stock', ah(async (req, res) => {
   });
 }));
 
-// Leaderboards for the Overview page
+// Leaderboards for the Overview page (top N via SQL ORDER BY … LIMIT)
 router.get('/leaderboards', ah(async (req, res) => {
   const ctx = await context(req);
   const limit = Math.min(20, parseInt(req.query.per_page, 10) || 5);
-  const rows = await lineItems(ctx);
-  const prod = new Map();
-  for (const r of rows) {
-    const id = Number(r.productId);
-    if (!id) continue;
-    if (!prod.has(id)) prod.set(id, { product_id: id, name: r.name, items_sold: 0, net_revenue: 0 });
-    const p = prod.get(id);
-    p.items_sold += Number(r.quantity);
-    p.net_revenue += n(r.total);
-  }
-  const products = await prisma.product.findMany({ where: { id: { in: [...prod.keys()] } }, select: { id: true, name: true, categories: { select: { id: true, name: true } } } });
-  const cats = new Map();
-  for (const p of products) {
-    const s = prod.get(p.id);
-    s.name = p.name;
-    for (const c of p.categories) {
-      if (!cats.has(c.id)) cats.set(c.id, { category_id: c.id, name: c.name, items_sold: 0, net_revenue: 0 });
-      cats.get(c.id).items_sold += s.items_sold;
-      cats.get(c.id).net_revenue += s.net_revenue;
-    }
-  }
-  const top = (m) => [...m.values()].sort((a, b) => b.items_sold - a.items_sold).slice(0, limit).map((x) => ({ ...x, net_revenue: r2(x.net_revenue) }));
-  const coupons = await prisma.$queryRawUnsafe(`
-    SELECT oi.code AS code, COUNT(DISTINCT oi.orderId) AS orders_count, SUM(oi.discount) AS amount
-    FROM OrderItem oi JOIN \`Order\` o ON o.id = oi.orderId
-    WHERE oi.type = 'coupon' AND o.createdAt >= ? AND o.createdAt < ? AND o.status NOT IN (${inList(ctx.statuses)})
-    GROUP BY oi.code ORDER BY orders_count DESC LIMIT ${limit}`, ctx.start, ctx.end, ...ctx.statuses);
+  const [prods, cats, coupons] = await Promise.all([
+    prisma.$queryRawUnsafe(`
+      SELECT l.productId AS product_id, SUM(l.quantity) AS items_sold, SUM(l.netRevenue) AS net_revenue
+      FROM OrderProductLookup l WHERE ${range(ctx, 'l')}
+      GROUP BY l.productId ORDER BY items_sold DESC LIMIT ${limit}`, ...rangeParams(ctx)),
+    prisma.$queryRawUnsafe(`
+      SELECT pc.B AS category_id, SUM(l.quantity) AS items_sold, SUM(l.netRevenue) AS net_revenue
+      FROM OrderProductLookup l JOIN _ProductToCategory pc ON pc.A = l.productId
+      WHERE ${range(ctx, 'l')}
+      GROUP BY pc.B ORDER BY items_sold DESC LIMIT ${limit}`, ...rangeParams(ctx)),
+    prisma.$queryRawUnsafe(`
+      SELECT c.code AS code, COUNT(*) AS orders_count, SUM(c.discount) AS amount
+      FROM OrderCouponLookup c WHERE ${range(ctx, 'c')}
+      GROUP BY c.code ORDER BY orders_count DESC LIMIT ${limit}`, ...rangeParams(ctx)),
+  ]);
+  const [pNames, cNames] = await Promise.all([
+    prisma.product.findMany({ where: { id: { in: prods.map((p) => Number(p.product_id)) } }, select: { id: true, name: true } }),
+    prisma.productCategory.findMany({ where: { id: { in: cats.map((c) => Number(c.category_id)) } }, select: { id: true, name: true } }),
+  ]);
+  const pn = new Map(pNames.map((p) => [p.id, p.name]));
+  const cn = new Map(cNames.map((c) => [c.id, c.name]));
   res.json({
-    products: top(prod),
-    categories: top(cats),
+    products: prods.map((p) => ({ product_id: Number(p.product_id), name: pn.get(Number(p.product_id)) || `#${p.product_id}`, items_sold: n(p.items_sold), net_revenue: r2(p.net_revenue) })),
+    categories: cats.map((c) => ({ category_id: Number(c.category_id), name: cn.get(Number(c.category_id)) || `#${c.category_id}`, items_sold: n(c.items_sold), net_revenue: r2(c.net_revenue) })),
     coupons: coupons.map((c) => ({ code: c.code, orders_count: Number(c.orders_count), amount: r2(c.amount) })),
   });
 }));
 
-module.exports = { router, lowStockThresholds, DEFAULT_EXCLUDED };
+// Rebuild lookup tables (after imports or manual DB changes). Runs in the background.
+let rebuilding = null;
+router.post('/rebuild', can('manage_woocommerce'), ah(async (req, res) => {
+  if (rebuilding) return res.status(409).json({ code: 'rebuild_running', message: 'A rebuild is already running.', data: { status: 409 } });
+  const { rebuildAll } = require('../services/order-stats');
+  rebuilding = rebuildAll(() => {}).finally(() => { rebuilding = null; require('../lib/cache').clear(); });
+  res.status(202).json({ started: true });
+}));
+
+module.exports = { router, lowStockThresholds, DEFAULT_EXCLUDED, excludedStatuses };

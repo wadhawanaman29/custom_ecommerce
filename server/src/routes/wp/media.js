@@ -63,7 +63,7 @@ router.get('/', cached(), ah(async (req, res) => {
   if (q.mime_type) where.mimeType = String(q.mime_type);
   if (q.slug) where.slug = String(q.slug);
   if (q.author) where.authorId = parseInt(q.author, 10);
-  if (c.search) where.OR = [{ title: { contains: c.search } }, { fileName: { contains: c.search } }];
+  if (c.search) where.OR = [{ title: { startsWith: c.search } }, { fileName: { startsWith: c.search } }, { slug: { startsWith: c.search } }];
   const orderBy = c.orderby === 'id' ? { id: c.order } : c.orderby === 'title' ? { title: c.order } : { createdAt: c.order };
   const [total, rows] = await Promise.all([prisma.media.count({ where }), prisma.media.findMany({ where, orderBy, skip: c.skip, take: c.take })]);
   setPaginationHeaders(req, res, total, c);

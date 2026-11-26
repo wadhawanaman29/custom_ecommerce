@@ -10,6 +10,8 @@ const { store } = require('../../lib/options');
 const { runBatch } = require('../../lib/batch');
 const { hashPassword } = require('../../lib/password');
 const { can } = require('../../middleware/auth');
+const { searchWhere } = require('../../lib/search');
+const { countOf } = require('../../lib/cache');
 
 const router = express.Router();
 const API = `${config.siteUrl}/wp-json/wc/v3`;
@@ -113,11 +115,12 @@ router.get('/', can('list_users'), ah(async (req, res) => {
   if (c.include) where.id = { in: c.include };
   if (c.exclude) where.id = { ...(where.id || {}), notIn: c.exclude };
   if (c.search) {
-    where.OR = [{ email: { contains: c.search } }, { login: { contains: c.search } }, { firstName: { contains: c.search } }, { lastName: { contains: c.search } }, { displayName: { contains: c.search } }];
+    const sw = await searchWhere('User', ['email', 'login', 'firstName', 'lastName', 'displayName'], c.search, ['email', 'login']);
+    if (sw) where.AND = [sw];
   }
   const orderBy = c.orderby === 'id' ? { id: c.order } : c.orderby === 'registered_date' ? { createdAt: c.order } : { displayName: c.order };
   const [total, rows] = await Promise.all([
-    prisma.user.count({ where }),
+    countOf('user', where),
     prisma.user.findMany({ where, orderBy, skip: c.skip, take: c.take }),
   ]);
   setPaginationHeaders(req, res, total, c);

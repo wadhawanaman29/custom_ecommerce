@@ -11,6 +11,8 @@ const {
   orderInclude, serializeOrders, serializeNote, serializeRefund,
 } = require('../../serializers/order');
 const svc = require('../../services/order');
+const { searchWhere } = require('../../lib/search');
+const { countOf } = require('../../lib/cache');
 
 const router = express.Router();
 const isStaff = (req) => req.can('edit_shop_orders');
@@ -46,23 +48,16 @@ router.get('/', readAccess, ah(async (req, res) => {
   if (q.modified_after) AND.push({ updatedAt: { gt: parseWpDate(q.modified_after, gmt, s.gmtOffset) } });
   if (q.modified_before) AND.push({ updatedAt: { lt: parseWpDate(q.modified_before, gmt, s.gmtOffset) } });
   if (c.search) {
-    const t = c.search;
-    const asId = parseInt(t.replace('#', ''), 10);
-    AND.push({
-      OR: [
-        ...(Number.isFinite(asId) ? [{ id: asId }] : []),
-        { billing: { path: '$.email', string_contains: t } },
-        { billing: { path: '$.first_name', string_contains: t } },
-        { billing: { path: '$.last_name', string_contains: t } },
-        { billing: { path: '$.phone', string_contains: t } },
-        { items: { some: { type: 'line_item', name: { contains: t } } } },
-      ],
-    });
+    // Indexed search: order number/ID, billing email/phone prefix, FULLTEXT on name/email/phone
+    const t = c.search.trim();
+    const asId = /^#?\d+$/.test(t) ? parseInt(t.replace('#', ''), 10) : null;
+    const sw = await searchWhere('Order', ['billingName', 'billingEmail', 'billingPhone'], t, ['billingEmail', 'billingPhone', 'number']);
+    AND.push({ OR: [...(asId ? [{ id: asId }] : []), ...(sw ? sw.OR || [sw] : [])] });
   }
   if (AND.length) where.AND = AND;
   const orderBy = c.orderby === 'id' ? { id: c.order } : c.orderby === 'modified' ? { updatedAt: c.order } : [{ createdAt: c.order }, { id: c.order }];
   const [total, rows] = await Promise.all([
-    prisma.order.count({ where }),
+    countOf('order', where),
     prisma.order.findMany({ where, include: orderInclude, orderBy, skip: c.skip, take: c.take }),
   ]);
   if (c.orderby === 'include' && c.include) rows.sort((a, b) => c.include.indexOf(a.id) - c.include.indexOf(b.id));
@@ -114,6 +109,7 @@ router.delete('/:id(\\d+)', can('edit_shop_orders'), ah(async (req, res) => {
   }
   if (existing.status === 'trash') throw new ApiError(410, 'woocommerce_rest_already_trashed', `The order with ID ${existing.id} has already been deleted.`);
   await prisma.order.update({ where: { id: existing.id }, data: { status: 'trash' } });
+  await require('../../services/order-stats').syncOrderSafe(existing.id);
   res.json({ ...out, status: 'trash' });
 }));
 

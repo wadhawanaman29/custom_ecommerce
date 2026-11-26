@@ -12,6 +12,8 @@ const { uniqueSlug } = require('../../lib/slug');
 const { store } = require('../../lib/options');
 const { cached } = require('../../lib/cache');
 const { wpautop, autoExcerpt } = require('../../lib/wpautop');
+const { searchWhere } = require('../../lib/search');
+const { countOf } = require('../../lib/cache');
 const { can, userCan } = require('../../middleware/auth');
 
 const WP = `${config.siteUrl}/wp-json/wp/v2`;
@@ -265,7 +267,11 @@ function postRouter(type, cfg = null) {
     if (q.before) AND.push({ createdAt: { lt: parseWpDate(q.before, false, s.gmtOffset) } });
     if (q.modified_after) AND.push({ updatedAt: { gt: parseWpDate(q.modified_after, false, s.gmtOffset) } });
     if (q.modified_before) AND.push({ updatedAt: { lt: parseWpDate(q.modified_before, false, s.gmtOffset) } });
-    if (c.search) AND.push({ OR: [{ title: { contains: c.search } }, { excerpt: { contains: c.search } }, { content: { contains: c.search } }] });
+    if (c.search) {
+      // FULLTEXT on title/content (+ slug prefix) instead of scanning post content
+      const sw = await searchWhere('Post', ['title', 'content'], c.search, ['slug']);
+      if (sw) AND.push(sw);
+    }
     if (AND.length) where.AND = AND;
     const orderMap = {
       id: { id: c.order }, title: { title: c.order }, slug: { slug: c.order }, modified: { updatedAt: c.order },
@@ -273,7 +279,7 @@ function postRouter(type, cfg = null) {
     };
     const orderBy = orderMap[c.orderby] || [{ createdAt: c.order }, { id: c.order }];
     const [total, rows] = await Promise.all([
-      prisma.post.count({ where }),
+      countOf('post', where),
       prisma.post.findMany({ where, include, orderBy, skip: c.skip, take: c.take }),
     ]);
     if (c.orderby === 'include' && c.include) rows.sort((a, b) => c.include.indexOf(a.id) - c.include.indexOf(b.id));

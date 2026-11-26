@@ -37,7 +37,9 @@ async function validateCoupon(coupon, {
   if (coupon.dateExpires && coupon.dateExpires < new Date()) throw err('woocommerce_rest_invalid_coupon', 'This coupon has expired.');
   if (coupon.usageLimit && coupon.usageCount >= coupon.usageLimit) throw err('woocommerce_rest_invalid_coupon', 'Coupon usage limit has been reached.');
   if (coupon.usageLimitPerUser && (customerId || email)) {
-    const used = arr(coupon.usedBy).filter((u) => String(u) === String(customerId) || (email && String(u).toLowerCase() === String(email).toLowerCase())).length;
+    // Indexed count on CouponUsage (couponId, usedBy) — no unbounded JSON list
+    const who = [customerId ? String(customerId) : null, email ? String(email).toLowerCase() : null].filter(Boolean);
+    const used = await prisma.couponUsage.count({ where: { couponId: coupon.id, usedBy: { in: who } } });
     if (used >= coupon.usageLimitPerUser) throw err('woocommerce_rest_invalid_coupon', 'Coupon usage limit has been reached.');
   }
   if (coupon.minimumAmount !== null && Number(coupon.minimumAmount) > 0 && subtotal < Number(coupon.minimumAmount)) {

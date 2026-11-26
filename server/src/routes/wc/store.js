@@ -393,19 +393,19 @@ router.get('/reports/sales', can('view_woocommerce_reports'), ah(async (req, res
     from = new Date(now.getTime() - days * 86400000);
   }
   const where = { status: { in: ['processing', 'completed', 'on-hold'] }, createdAt: { gte: from, lte: to } };
-  const [agg, items, refunds] = await Promise.all([
-    prisma.order.aggregate({ where, _sum: { total: true, totalTax: true, shippingTotal: true, shippingTax: true, discountTotal: true }, _count: { _all: true } }),
-    prisma.orderItem.aggregate({ where: { type: 'line_item', order: where }, _sum: { quantity: true, total: true } }),
+  // Reads the OrderStats lookup table (status, createdAt index) — never scans orders/items
+  const [agg, refunds] = await Promise.all([
+    prisma.orderStats.aggregate({ where, _sum: { total: true, taxTotal: true, shippingTotal: true, discountTotal: true, netTotal: true, numItemsSold: true }, _count: { _all: true } }),
     prisma.orderRefund.aggregate({ where: { createdAt: { gte: from, lte: to } }, _sum: { amount: true } }),
   ]);
   const days = Math.max(1, Math.ceil((to - from) / 86400000));
   res.json([{
     total_sales: money(agg._sum.total, s.dp),
-    net_sales: money(Number(agg._sum.total || 0) - Number(agg._sum.totalTax || 0) - Number(agg._sum.shippingTotal || 0), s.dp),
+    net_sales: money(agg._sum.netTotal, s.dp),
     average_sales: money(Number(agg._sum.total || 0) / days, s.dp),
     total_orders: agg._count._all,
-    total_items: items._sum.quantity || 0,
-    total_tax: money(agg._sum.totalTax, s.dp),
+    total_items: agg._sum.numItemsSold || 0,
+    total_tax: money(agg._sum.taxTotal, s.dp),
     total_shipping: money(agg._sum.shippingTotal, s.dp),
     total_refunds: Number(refunds._sum.amount || 0),
     total_discount: money(agg._sum.discountTotal, s.dp),
@@ -415,11 +415,16 @@ router.get('/reports/sales', can('view_woocommerce_reports'), ah(async (req, res
   }]);
 }));
 router.get('/reports/top_sellers', can('view_woocommerce_reports'), ah(async (req, res) => {
-  const rows = await prisma.orderItem.groupBy({
-    by: ['productId', 'name'], where: { type: 'line_item', productId: { not: null }, order: { status: { in: ['processing', 'completed', 'on-hold'] } } },
+  // WooCommerce defaults to the current week; aggregated from the indexed product lookup table
+  const days = { week: 7, month: 30, last_month: 60, year: 365 }[req.query.period] || 7;
+  const from = req.query.date_min ? new Date(`${req.query.date_min}T00:00:00Z`) : new Date(Date.now() - days * 86400000);
+  const to = req.query.date_max ? new Date(`${req.query.date_max}T23:59:59Z`) : new Date();
+  const rows = await prisma.orderProductLookup.groupBy({
+    by: ['productId'], where: { status: { in: ['processing', 'completed', 'on-hold'] }, createdAt: { gte: from, lte: to } },
     _sum: { quantity: true }, orderBy: { _sum: { quantity: 'desc' } }, take: 10,
   });
-  res.json(rows.map((r) => ({ name: r.name, product_id: r.productId, quantity: r._sum.quantity })));
+  const names = new Map((await prisma.product.findMany({ where: { id: { in: rows.map((r) => r.productId) } }, select: { id: true, name: true } })).map((p) => [p.id, p.name]));
+  res.json(rows.map((r) => ({ name: names.get(r.productId) || `#${r.productId}`, product_id: r.productId, quantity: r._sum.quantity })));
 }));
 
 module.exports = router;

@@ -22,7 +22,19 @@ function set(key, value, ttl = config.cacheTtl) {
   store.set(key, { value, expires: Date.now() + ttl * 1000 });
 }
 
-function clear() { store.clear(); }
+// Short-lived cache for COUNT(*) used by pagination headers. Counting millions of rows on every
+// list request is expensive; totals may lag by a few seconds and are cleared on any write.
+const counts = new Map();
+async function cachedCount(key, fn, ttlMs = 30000) {
+  const hit = counts.get(key);
+  if (hit && hit.expires > Date.now()) return hit.value;
+  const value = await fn();
+  if (counts.size > 2000) counts.delete(counts.keys().next().value);
+  counts.set(key, { value, expires: Date.now() + ttlMs });
+  return value;
+}
+
+function clear() { store.clear(); counts.clear(); }
 
 function clearOnWrite() {
   return (req, res, next) => {
@@ -72,4 +84,7 @@ function cached(ttl) {
   };
 }
 
-module.exports = { get, set, clear, clearOnWrite, cached };
+// Count with caching, keyed by model + where (BigInt-safe)
+const countOf = (model, where) => cachedCount(`${model}:${JSON.stringify(where, (k, v) => (typeof v === 'bigint' ? String(v) : v))}`, () => require('../db')[model].count({ where }));
+
+module.exports = { get, set, clear, clearOnWrite, cached, cachedCount, countOf };

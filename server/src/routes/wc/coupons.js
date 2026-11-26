@@ -16,6 +16,7 @@ const API = `${config.siteUrl}/wp-json/wc/v3`;
 const has = (o, k) => o && Object.prototype.hasOwnProperty.call(o, k);
 const ids = (v) => (Array.isArray(v) ? v.map((x) => parseInt(x, 10)).filter(Boolean) : []);
 const arr = (v) => (Array.isArray(v) ? v : []);
+const USAGES = { usages: { orderBy: { id: 'desc' }, take: 100, select: { usedBy: true } } };
 
 function serializeCoupon(c, s) {
   return {
@@ -45,7 +46,8 @@ function serializeCoupon(c, s) {
     minimum_amount: money(c.minimumAmount, s.dp),
     maximum_amount: money(c.maximumAmount, s.dp),
     email_restrictions: arr(c.emailRestrictions),
-    used_by: arr(c.usedBy).map(String),
+    // Most recent users (capped — popular coupons can have hundreds of thousands of uses)
+    used_by: c.usages ? c.usages.map((u) => u.usedBy) : [],
     meta_data: metaOut(c.meta),
     _links: { self: [{ href: `${API}/coupons/${c.id}` }], collection: [{ href: `${API}/coupons` }] },
   };
@@ -89,11 +91,11 @@ async function saveCoupon(body, existing, s) {
   if (has(body, 'date_expires_gmt')) d.dateExpires = parseWpDate(body.date_expires_gmt, true);
   else if (has(body, 'date_expires')) d.dateExpires = parseWpDate(body.date_expires, false, s.gmtOffset);
   if (has(body, 'meta_data')) d.meta = metaMerge(existing?.meta, body.meta_data);
-  return existing ? prisma.coupon.update({ where: { id: existing.id }, data: d }) : prisma.coupon.create({ data: d });
+  return existing ? prisma.coupon.update({ where: { id: existing.id }, data: d, include: USAGES }) : prisma.coupon.create({ data: d, include: USAGES });
 }
 
 async function findCoupon(id) {
-  const c = await prisma.coupon.findUnique({ where: { id: intParam(id, 'woocommerce_rest_shop_coupon_invalid_id') } });
+  const c = await prisma.coupon.findUnique({ where: { id: intParam(id, 'woocommerce_rest_shop_coupon_invalid_id') }, include: USAGES });
   if (!c) throw new ApiError(404, 'woocommerce_rest_shop_coupon_invalid_id', 'Invalid ID.');
   return c;
 }
@@ -109,7 +111,7 @@ router.get('/', can('edit_shop_coupons'), ah(async (req, res) => {
   if (c.exclude) where.id = { ...(where.id || {}), notIn: c.exclude };
   if (c.search) where.OR = [{ code: { contains: c.search.toLowerCase() } }, { description: { contains: c.search } }];
   const orderBy = c.orderby === 'id' ? { id: c.order } : c.orderby === 'title' || c.orderby === 'slug' ? { code: c.order } : c.orderby === 'modified' ? { updatedAt: c.order } : { createdAt: c.order };
-  const [total, rows] = await Promise.all([prisma.coupon.count({ where }), prisma.coupon.findMany({ where, orderBy, skip: c.skip, take: c.take })]);
+  const [total, rows] = await Promise.all([prisma.coupon.count({ where }), prisma.coupon.findMany({ where, orderBy, skip: c.skip, take: c.take, include: USAGES })]);
   setPaginationHeaders(req, res, total, c);
   res.json(rows.map((x) => serializeCoupon(x, s)));
 }));
@@ -139,7 +141,7 @@ router.delete('/:id(\\d+)', can('edit_shop_coupons'), ah(async (req, res) => {
     await prisma.coupon.delete({ where: { id: c.id } });
     return res.json(serializeCoupon(c, s));
   }
-  res.json(serializeCoupon(await prisma.coupon.update({ where: { id: c.id }, data: { status: 'trash' } }), s));
+  res.json(serializeCoupon(await prisma.coupon.update({ where: { id: c.id }, data: { status: 'trash' }, include: USAGES }), s));
 }));
 
 module.exports = router;
