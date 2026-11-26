@@ -198,7 +198,7 @@ async function createOrUpdateProduct(body, s, existing = null) {
   const mediaIds = has(body, 'images') ? await resolveImages(body.images) : null;
   const attributes = has(body, 'attributes') ? await resolveAttributes(body.attributes) : null;
 
-  return prisma.$transaction(async (tx) => {
+  const saved = await prisma.$transaction(async (tx) => {
     const relationData = {};
     if (has(body, 'categories')) relationData.categories = { set: termConnect(body.categories) };
     if (has(body, 'tags')) relationData.tags = { set: termConnect(body.tags) };
@@ -218,6 +218,8 @@ async function createOrUpdateProduct(body, s, existing = null) {
     }
     return product;
   });
+  await require('./auto-sku').ensureSku(saved.id); // Plugins → Auto SKU
+  return saved;
 }
 
 async function createOrUpdateVariation(parent, body, s, existing = null) {
@@ -241,6 +243,7 @@ async function createOrUpdateVariation(parent, body, s, existing = null) {
     return v;
   });
   await syncVariableParent(parent.id);
+  await require('./auto-sku').ensureSku(variation.id); // Plugins → Auto SKU
   return variation;
 }
 

@@ -4,7 +4,7 @@ const { money, wpDate, wpDateGmt, metaOut, mediaUrl } = require('../lib/format')
 const { symbol } = require('../lib/currency');
 
 const API = `${config.siteUrl}/wp-json/wc/v3`;
-const INTERNAL = ['_order_stock_reduced', '_recorded_sales', '_recorded_coupon_usage_counts', '_tax_status', 'coupon_info'];
+const INTERNAL = ['_new_order_email_sent', '_order_stock_reduced', '_recorded_sales', '_recorded_coupon_usage_counts', '_tax_status', 'coupon_info'];
 const publicMeta = (meta) => metaOut((meta || []).filter((m) => !INTERNAL.includes(m.key)));
 
 const orderInclude = {

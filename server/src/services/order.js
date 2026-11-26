@@ -411,6 +411,8 @@ async function onStatusChange(orderId, from, to, { note = '', silent = false } =
   const { syncVariableParent } = require('./product');
   for (const id of parents) await syncVariableParent(id);
   await require('./order-stats').syncOrderSafe(orderId);
+  // WooCommerce emails for this transition (queued, sent in the background)
+  if (!silent && from !== to) await require('./email/triggers').orderStatusChanged(orderId, from, to);
 }
 
 // Coupon usage is one CouponUsage row per use (indexed), plus an atomic counter on the coupon
@@ -493,7 +495,11 @@ async function saveOrder(body, s, existing = null, req = null) {
 
   const orderId = await prisma.$transaction(async (tx) => {
     const order = isNew ? await tx.order.create({ data }) : await tx.order.update({ where: { id: existing.id }, data });
-    if (isNew) await tx.order.update({ where: { id: order.id }, data: { number: String(order.id) } });
+    if (isNew) {
+      // Order number: order ID, or the configured format/counter (Plugins → Order Numbers)
+      const number = await require('./ordernumbers').assignNumber(tx, order);
+      await tx.order.update({ where: { id: order.id }, data: { number } });
+    }
     if (calc) {
       const rows = itemRows(st, calc.taxLines);
       // Tax lines are always rebuilt; removed items deleted; others updated or created.
@@ -555,6 +561,8 @@ async function refundOrder(order, body, s, req) {
   if (round(remaining - amount, s.dp) <= 0 && order.status !== 'refunded') {
     await prisma.order.update({ where: { id: order.id }, data: { status: 'refunded' } });
     await onStatusChange(order.id, order.status, 'refunded', { note: 'Order fully refunded.' });
+  } else {
+    await require('./email/triggers').partialRefund(order.id, refund.id);
   }
   return refund;
 }

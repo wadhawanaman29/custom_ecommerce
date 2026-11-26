@@ -105,6 +105,7 @@ app.use('/wp-json/wp/v2', wp);
 
 app.use('/wp-json/jwt-auth/v1', wpUsers.jwtAuth);
 app.use('/wp-json/menus/v1', site.menusV1);
+app.use('/wp-json/custom/v1/admin/plugins', require('./routes/plugins'));
 app.use('/wp-json/custom/v1/admin/analytics', require('./routes/analytics').router);
 app.use('/wp-json/custom/v1/admin', require('./routes/admin'));
 app.use('/wp-json/custom/v1', site.custom);

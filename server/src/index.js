@@ -3,6 +3,7 @@ const config = require('./config');
 const prisma = require('./db');
 
 const server = app.listen(config.port, () => {
+  require('./lib/scheduler').start(); // scheduled sales, email queue
   console.log(`API listening on ${config.siteUrl} (port ${config.port})`);
   console.log(`  WooCommerce: ${config.siteUrl}/wp-json/wc/v3`);
   console.log(`  WordPress:   ${config.siteUrl}/wp-json/wp/v2`);

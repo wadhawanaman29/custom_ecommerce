@@ -337,6 +337,7 @@ model Order {
   @@index([createdAt])
   @@index([updatedAt])
   @@index([orderKey])
+  @@index([number])
   @@index([billingEmail])
   @@index([billingPhone])
   @@fulltext([billingName, billingEmail, billingPhone])
@@ -666,4 +667,32 @@ model MenuItem {
   menuOrder Int      @default(0)
 
   @@index([menuId, menuOrder])
+}
+
+// ───────────────────────────── Counters & email ─────────────────────────────
+
+// Atomic counters (e.g. order numbers). Incremented with UPDATE … LAST_INSERT_ID(value + 1).
+model Counter {
+  name  String @id @db.VarChar(100)
+  value Int    @default(0)
+}
+
+// Outgoing email queue + log. Content is rendered at send time (no HTML stored → small rows).
+model EmailLog {
+  id        Int       @id @default(autoincrement())
+  template  String    @db.VarChar(60)   // new_order, customer_processing_order, test, …
+  to        String    @db.VarChar(500)
+  subject   String    @default("") @db.VarChar(500)
+  orderId   Int?
+  userId    Int?
+  data      Json?     // extra payload (note text, refund id, …)
+  status    String    @default("queued") @db.VarChar(20) // queued | sent | failed | skipped
+  attempts  Int       @default(0)
+  error     String?   @db.Text
+  createdAt DateTime  @default(now())
+  sentAt    DateTime?
+
+  @@index([status, createdAt])
+  @@index([orderId])
+  @@index([createdAt])
 }

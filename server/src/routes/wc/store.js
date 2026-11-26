@@ -296,6 +296,8 @@ async function settingOut(def) {
   let value = await options.getOption(def.id);
   if (value === undefined || value === null) value = def.default;
   const out = { id: def.id, label: def.label, description: def.description, type: def.type, default: def.default, tip: def.tip, value, group_id: def.group_id };
+  // Secrets are never sent back; has_value tells the UI one is stored
+  if (def.type === 'password') { out.has_value = !!value; out.value = ''; }
   if (def.options) out.options = def.options;
   out._links = { self: [{ href: `${API}/settings/${def.group_id}/${def.id}` }], collection: [{ href: `${API}/settings/${def.group_id}` }] };
   return out;
@@ -307,6 +309,7 @@ function findSetting(group, id) {
 }
 async function updateSetting(def, value) {
   if (def.type === 'checkbox' && typeof value === 'boolean') value = value ? 'yes' : 'no';
+  if (def.type === 'password' && (value === '' || value === undefined || value === null)) return settingOut(def); // keep stored secret
   if (def.options && !['multiselect', 'checkbox'].includes(def.type) && !has(def.options, value) && !(def.type === 'select' && !Object.keys(def.options).length)) {
     throw badRequest('rest_setting_value_invalid', 'An invalid setting value was passed.');
   }

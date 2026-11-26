@@ -130,6 +130,7 @@ router.post('/:oid(\\d+)/notes', can('edit_shop_orders'), ah(async (req, res) =>
   if (!req.body || !req.body.note) throw badRequest('woocommerce_rest_invalid_order_note', 'Cannot create order note, please try again.');
   const author = bool(req.body.added_by_user) && req.user ? req.user.displayName || req.user.login : 'system';
   const n = await svc.addNote(o.id, String(req.body.note), { customerNote: bool(req.body.customer_note), author });
+  if (bool(req.body.customer_note)) await require('../../services/email/triggers').customerNote(o.id, String(req.body.note));
   res.status(201).json(serializeNote(n, s, o.id));
 }));
 router.get('/:oid(\\d+)/notes/:id(\\d+)', readAccess, ah(async (req, res) => {

@@ -13,6 +13,11 @@ const groups = [
   { id: 'email', label: 'Emails', description: '', parent_id: '', sub_groups: [] },
   { id: 'advanced', label: 'Advanced', description: '', parent_id: '', sub_groups: [] },
   { id: 'analytics', label: 'Analytics', description: '', parent_id: '', sub_groups: [] },
+  // Plugin replacements
+  { id: 'ordernumbers', label: 'Order Numbers', description: 'WooCommerce Basic Ordernumbers', parent_id: '', sub_groups: [] },
+  { id: 'storewide_sale', label: 'Storewide Sale', description: 'Storewide Sale', parent_id: '', sub_groups: [] },
+  { id: 'auto_sku', label: 'Auto SKU', description: 'Easy Auto SKU Generator', parent_id: '', sub_groups: [] },
+  { id: 'smtp', label: 'SMTP', description: 'SMTP for Amazon SES (YaySMTP)', parent_id: '', sub_groups: [] },
   { id: 'wp', label: 'WordPress', description: 'Site settings (Settings → General/Reading/Permalinks)', parent_id: '', sub_groups: [] },
 ];
 
@@ -116,6 +121,49 @@ const settings = [
   s('advanced', 'woocommerce_checkout_order_received_endpoint', 'Order received', 'text', 'order-received'),
   s('advanced', 'woocommerce_myaccount_orders_endpoint', 'Orders', 'text', 'orders'),
   s('advanced', 'woocommerce_api_enabled', 'Enable the legacy REST API', 'checkbox', 'no'),
+
+  // Order numbers (replaces "WooCommerce Basic Ordernumbers")
+  s('ordernumbers', 'ordernumbers_enabled', 'Customize order numbers', 'checkbox', 'no', { description: 'Off = the order ID is used as the order number (WooCommerce default).' }),
+  s('ordernumbers', 'ordernumbers_format', 'Order number format', 'text', '{counter}', { description: 'Placeholders: {counter}, {YYYY}, {YY}, {MM}, {DD}. Example: GR-{YYYY}-{counter}' }),
+  s('ordernumbers', 'ordernumbers_counter_digits', 'Counter digits', 'number', '0', { description: 'Pad the counter with leading zeros to this many digits (0 = no padding).' }),
+  s('ordernumbers', 'ordernumbers_counter_start', 'First counter value', 'number', '1', { description: 'Used when a counter starts (new store, or a new period when resetting).' }),
+  s('ordernumbers', 'ordernumbers_reset', 'Reset counter', 'select', 'never', { options: { never: 'Never', yearly: 'Every year', monthly: 'Every month', daily: 'Every day' } }),
+
+  // Storewide sale (replaces "Storewide Sale")
+  s('storewide_sale', 'storewide_sale_discount_type', 'Discount type', 'select', 'percent', { options: { percent: 'Percentage off', fixed: 'Fixed amount off' } }),
+  s('storewide_sale', 'storewide_sale_amount', 'Discount', 'number', '10'),
+  s('storewide_sale', 'storewide_sale_scope', 'Apply to', 'select', 'all', { options: { all: 'All products', categories: 'Only these categories', exclude_categories: 'All except these categories' } }),
+  s('storewide_sale', 'storewide_sale_categories', 'Categories', 'multiselect', []),
+  s('storewide_sale', 'storewide_sale_exclude_products', 'Exclude products', 'multiselect', []),
+  s('storewide_sale', 'storewide_sale_skip_on_sale', 'Skip products already on sale', 'checkbox', 'yes'),
+  s('storewide_sale', 'storewide_sale_start', 'Sale starts', 'text', ''),
+  s('storewide_sale', 'storewide_sale_end', 'Sale ends', 'text', ''),
+  s('storewide_sale', 'storewide_sale_rounding', 'Round sale prices', 'select', 'none', { options: { none: 'No rounding (2 decimals)', whole: 'Whole number', 99: 'End in .99', 95: 'End in .95' } }),
+
+  // Auto SKU (replaces "Easy Auto SKU Generator")
+  s('auto_sku', 'auto_sku_enabled', 'Generate SKUs automatically', 'checkbox', 'no'),
+  s('auto_sku', 'auto_sku_variations', 'Variations without a SKU', 'checkbox', 'yes', { description: 'Parent SKU + attribute values (or variation ID).' }),
+  s('auto_sku', 'auto_sku_variation_format', 'Variation SKU format', 'select', 'attributes', { options: { attributes: 'Parent SKU + attribute values (e.g. TEE-RED-L)', id: 'Parent SKU + variation ID (e.g. TEE-123)' } }),
+  s('auto_sku', 'auto_sku_products', 'Products without a SKU', 'checkbox', 'no'),
+  s('auto_sku', 'auto_sku_product_format', 'Product SKU format', 'select', 'id', { options: { id: 'Prefix + product ID', slug: 'Prefix + product slug' } }),
+  s('auto_sku', 'auto_sku_prefix', 'Prefix', 'text', ''),
+  s('auto_sku', 'auto_sku_separator', 'Separator', 'text', '-'),
+  s('auto_sku', 'auto_sku_uppercase', 'Uppercase', 'checkbox', 'yes'),
+
+  // Email sending (replaces "SMTP for AmazonSES – YaySMTP")
+  s('smtp', 'smtp_mailer', 'Mailer', 'select', 'log', { options: { ses: 'Amazon SES (SMTP)', smtp: 'Other SMTP server', log: 'Do not send (log only)' }, description: '"Log only" records emails in the Email Log without sending them — use it on test servers.' }),
+  s('smtp', 'smtp_ses_region', 'Amazon SES region', 'select', 'ap-southeast-2', {
+    options: {
+      'us-east-1': 'US East (N. Virginia)', 'us-east-2': 'US East (Ohio)', 'us-west-2': 'US West (Oregon)', 'eu-west-1': 'EU (Ireland)', 'eu-west-2': 'EU (London)',
+      'eu-central-1': 'EU (Frankfurt)', 'ap-southeast-1': 'Asia Pacific (Singapore)', 'ap-southeast-2': 'Asia Pacific (Sydney)', 'ap-south-1': 'Asia Pacific (Mumbai)', 'ap-northeast-1': 'Asia Pacific (Tokyo)', 'ca-central-1': 'Canada (Central)',
+    },
+  }),
+  s('smtp', 'smtp_host', 'SMTP host', 'text', '', { description: 'For Amazon SES this is set from the region.' }),
+  s('smtp', 'smtp_port', 'SMTP port', 'number', '587'),
+  s('smtp', 'smtp_encryption', 'Encryption', 'select', 'tls', { options: { tls: 'TLS (STARTTLS, port 587)', ssl: 'SSL (port 465)', none: 'None' } }),
+  s('smtp', 'smtp_username', 'SMTP username', 'text', '', { description: 'Amazon SES: the SMTP username from SES → SMTP settings (not your AWS access key).' }),
+  s('smtp', 'smtp_password', 'SMTP password', 'password', ''),
+  s('smtp', 'smtp_force_from', 'Always send from the "From" address', 'checkbox', 'yes', { description: 'Uses WooCommerce → Settings → Emails → "From" name/address. SES requires a verified sender.' }),
 
   // Analytics (WooCommerce → Analytics → Settings)
   s('analytics', 'woocommerce_excluded_report_order_statuses', 'Excluded statuses', 'multiselect', ['pending', 'failed', 'cancelled'], { description: 'Orders with these statuses are excluded from all reports.' }),

@@ -28,6 +28,11 @@ const MENU = [
     { to: '/analytics/settings', label: 'Settings' },
   ] },
   { to: '/menus', label: 'Menus', icon: '☰', perm: 'settings' },
+  { label: 'Plugins', icon: '🧩', base: '/plugins', perm: 'shop', children: [
+    { to: '/plugins', label: 'Overview', end: true }, { to: '/plugins/order-numbers', label: 'Order Numbers' }, { to: '/plugins/storewide-sale', label: 'Storewide Sale' },
+    { to: '/plugins/auto-sku', label: 'Auto SKU' }, { to: '/plugins/smtp', label: 'Email (SMTP)' }, { to: '/plugins/email-log', label: 'Email Log' },
+    { to: '/plugins/order-export', label: 'Order Export' },
+  ] },
   { label: 'Users', icon: '👤', base: '/users', perm: 'users', children: [{ to: '/users', label: 'All Users', end: true }, { to: '/users/new', label: 'Add New' }] },
   { label: 'Tools', icon: '⚒', base: '/tools', perm: 'settings', children: [{ to: '/tools/import', label: 'Import from WordPress' }, { to: '/tools/content-types', label: 'Content Types' }, { to: '/tools/api-keys', label: 'REST API keys' }] },
   { label: 'Settings', icon: '⚙', base: '/settings', perm: 'settings', children: [{ to: '/settings', label: 'General', end: true }, { to: '/settings/reading', label: 'Reading' }] },

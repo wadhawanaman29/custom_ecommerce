@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { api, fetchAll, wc } from '../../api';
 import { useNotice } from '../../hooks';
 import SettingsForm from '../../components/SettingsForm';
+import { EmailsTab } from '../plugins/PluginPages';
 import { Loading, Modal, Notice, PageHeader, confirmDelete } from '../../components/ui';
 
 const TABS = [['general', 'General'], ['products', 'Products'], ['tax', 'Tax'], ['shipping', 'Shipping'], ['checkout', 'Payments'], ['account', 'Accounts & Privacy'], ['email', 'Emails'], ['advanced', 'Advanced']];
@@ -277,7 +278,8 @@ export default function WooSettings() {
       {tab === 'tax' && <><SettingsForm group="tax" onNotice={showNotice} /><TaxRates onNotice={showNotice} /></>}
       {tab === 'shipping' && <><ShippingZones onNotice={showNotice} /><h2>Shipping options</h2><SettingsForm group="shipping" onNotice={showNotice} /></>}
       {tab === 'checkout' && <><Gateways onNotice={showNotice} /><h2>Checkout options</h2><SettingsForm group="checkout" onNotice={showNotice} /></>}
-      {!['tax', 'shipping', 'checkout'].includes(tab) && <SettingsForm key={tab} group={tab} onNotice={showNotice} />}
+      {tab === 'email' && <EmailsTab onNotice={showNotice} />}
+      {!['tax', 'shipping', 'checkout', 'email'].includes(tab) && <SettingsForm key={tab} group={tab} onNotice={showNotice} />}
     </>
   );
 }

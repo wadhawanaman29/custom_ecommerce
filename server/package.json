@@ -29,6 +29,7 @@
     "morgan": "1.10.0",
     "multer": "2.0.2",
     "mysql2": "3.11.4",
+    "nodemailer": "6.9.16",
     "php-serialize": "4.1.1"
   },
   "devDependencies": {

@@ -128,7 +128,9 @@ router.get('/', can('list_users'), ah(async (req, res) => {
 }));
 
 router.post('/', can('create_users'), ah(async (req, res) => {
-  res.status(201).json(serializeCustomer(await saveCustomer(req.body || {}, null), await store()));
+  const user = await saveCustomer(req.body || {}, null);
+  await require('../../services/email/triggers').newAccount(user);
+  res.status(201).json(serializeCustomer(user, await store()));
 }));
 
 router.post('/batch', can('edit_users'), ah(async (req, res) => {

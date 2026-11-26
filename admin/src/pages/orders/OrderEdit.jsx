@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, wc } from '../../api';
 import { useNotice } from '../../hooks';
+import { ORDER_EMAIL_ACTIONS, sendOrderEmail } from '../plugins/PluginPages';
 import { STATUS_LABELS, date, decodeHtml, price } from '../../format';
 import {
   Loading, Modal, Notice, PageHeader, Postbox, confirmDelete,
@@ -255,6 +256,19 @@ export default function OrderEdit() {
               {!isNew && <button type="button" className="button-link-delete" onClick={() => confirmDelete(`order #${o.number}`) && api.del(wc(`orders/${id}`), { force: true }).then(() => navigate('/orders')).catch((e) => showNotice('error', e.message))}>Delete permanently</button>}
               <button type="button" className="button button-primary" disabled={saving} onClick={() => save()}>{saving ? 'Saving…' : isNew ? 'Create' : 'Update'}</button>
             </div>
+            {!isNew && (
+              <div className="flex mt">
+                <select defaultValue="" aria-label="Order action" id="order-action" style={{ flex: 1 }}>
+                  <option value="">Choose an action…</option>
+                  {ORDER_EMAIL_ACTIONS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+                </select>
+                <button type="button" className="button" onClick={() => {
+                  const sel = document.getElementById('order-action');
+                  if (!sel.value) return;
+                  sendOrderEmail(o.id, sel.value).then(() => { showNotice('success', 'Email queued. See Plugins → Email Log.'); sel.value = ''; api.get(wc(`orders/${id}/notes`)).then(setNotes).catch(() => {}); }).catch((e) => showNotice('error', e.message));
+                }}>Apply</button>
+              </div>
+            )}
             {!isNew && ['pending', 'failed', 'on-hold'].includes(o.status) && (
               <p className="mt"><button type="button" className="button" disabled={saving} onClick={() => save({ set_paid: true })}>Mark as paid</button></p>
             )}

@@ -38,6 +38,9 @@ function SettingField({ s, value, onChange, pages }) {
       );
     case 'email':
       return <input type="email" className="regular-text" value={value ?? ''} onChange={(e) => onChange(e.target.value)} />;
+    case 'password':
+      // Stored secrets are never sent to the browser; leave empty to keep the saved value
+      return <input type="password" className="regular-text" autoComplete="new-password" value={value ?? ''} placeholder={s.has_value ? '•••••••• (saved — leave empty to keep)' : ''} onChange={(e) => onChange(e.target.value)} />;
     default:
       return <input type="text" className="regular-text" value={value ?? ''} onChange={(e) => onChange(e.target.value)} />;
   }
@@ -56,7 +59,7 @@ function MultiText({ value, onChange }) {
 }
 
 // Loads wc/v3/settings/{group}, optionally limited to `only` ids, and saves changes via batch.
-export default function SettingsForm({ group, only, onNotice }) {
+export default function SettingsForm({ group, only, onNotice, onSaved }) {
   const [settings, setSettings] = useState(null);
   const [values, setValues] = useState({});
   const [pages, setPages] = useState([]);
@@ -82,8 +85,10 @@ export default function SettingsForm({ group, only, onNotice }) {
       const errors = r.update.filter((x) => x.error);
       if (errors.length) onNotice('error', errors.map((x) => `${x.id}: ${x.error.message}`).join('<br>'));
       else onNotice('success', 'Your settings have been saved.');
-      const saved = Object.fromEntries(r.update.filter((x) => !x.error).map((x) => [x.id, x.value]));
-      setSettings((ss) => ss.map((s) => (s.id in saved ? { ...s, value: saved[s.id] } : s)));
+      const saved = Object.fromEntries(r.update.filter((x) => !x.error).map((x) => [x.id, x]));
+      setSettings((ss) => ss.map((s) => (s.id in saved ? { ...s, value: saved[s.id].value, has_value: saved[s.id].has_value } : s)));
+      setValues((v) => ({ ...v, ...Object.fromEntries(Object.entries(saved).map(([k, x]) => [k, x.value])) }));
+      if (onSaved) onSaved();
     } catch (err) { onNotice('error', err.message); } finally { setSaving(false); }
   };
   return (

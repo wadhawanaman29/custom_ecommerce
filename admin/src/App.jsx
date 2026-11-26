@@ -36,6 +36,9 @@ import AnalyticsSettings from './pages/analytics/AnalyticsSettings';
 import ContentList from './pages/content/ContentList';
 import ContentEdit from './pages/content/ContentEdit';
 import ContentTypes from './pages/tools/ContentTypes';
+import {
+  AutoSku, EmailLog, OrderExport, OrderNumbers, PluginsOverview, Smtp, StorewideSale,
+} from './pages/plugins/PluginPages';
 import { ContentTypesProvider, useContentTypes } from './contentTypes';
 import { wp } from './api';
 
@@ -117,6 +120,13 @@ export default function App() {
         <Route path="tools/import" element={<Import />} />
         <Route path="tools/api-keys" element={<ApiKeys />} />
         <Route path="tools/content-types" element={<ContentTypes />} />
+        <Route path="plugins" element={<PluginsOverview />} />
+        <Route path="plugins/order-numbers" element={<OrderNumbers />} />
+        <Route path="plugins/storewide-sale" element={<StorewideSale />} />
+        <Route path="plugins/auto-sku" element={<AutoSku />} />
+        <Route path="plugins/smtp" element={<Smtp />} />
+        <Route path="plugins/email-log" element={<EmailLog />} />
+        <Route path="plugins/order-export" element={<OrderExport />} />
         <Route path="content/:type" element={<ContentList />} />
         <Route path="content/:type/new" element={<ContentEdit />} />
         <Route path="content/:type/tax/:tax" element={<CustomTaxonomyPage />} />

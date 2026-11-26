@@ -168,6 +168,15 @@ async function migrateOptions() {
   }
   log(`  ${rows.length} options`);
 
+  // WooCommerce email settings (enabled, recipient, subject, heading, additional content)
+  const emailIds = Object.keys(require('../email/templates').EMAILS);
+  const emailRows = await q(`SELECT option_name AS n, option_value AS v FROM ${T('options')} WHERE option_name IN (?)`, [emailIds.map((id) => `woocommerce_${id}_settings`)]);
+  for (const r of emailRows) {
+    const v = php(r.v);
+    if (v && typeof v === 'object') await options.setOption(r.n, { ...v });
+  }
+  log(`  ${emailRows.length} email settings`);
+
   // Payment gateways (woocommerce_<id>_settings)
   const order = php((rows.find((r) => r.n === 'woocommerce_gateway_order') || {}).v) || {};
   const gw = await q(`SELECT option_name AS n, option_value AS v FROM ${T('options')} WHERE option_name LIKE 'woocommerce\\_%\\_settings'`);
@@ -872,6 +881,29 @@ async function reset() {
   options.invalidate();
 }
 
+// New records must never take an ID that a later (top-up) import from WordPress will need:
+// move each table's AUTO_INCREMENT past WordPress's highest ID in the matching ID space.
+// (MySQL ignores values below the current maximum, so this is always safe.)
+async function reserveIds() {
+  const max = async (sql) => {
+    try { const [r] = await q(sql); return Number(Object.values(r)[0]) || 0; } catch { return 0; }
+  };
+  const posts = Math.max(await max(`SELECT MAX(ID) FROM ${T('posts')}`), (await tableExists('wc_orders')) ? await max(`SELECT MAX(id) FROM ${T('wc_orders')}`) : 0);
+  const users = await max(`SELECT MAX(ID) FROM ${T('users')}`);
+  const comments = await max(`SELECT MAX(comment_ID) FROM ${T('comments')}`);
+  const terms = await max(`SELECT MAX(term_id) FROM ${T('terms')}`);
+  const items = await max(`SELECT MAX(order_item_id) FROM ${T('woocommerce_order_items')}`);
+  const plan = [
+    ['Order', posts], ['Product', posts], ['Post', posts], ['Media', posts], ['Coupon', posts], ['OrderRefund', posts], ['MenuItem', posts],
+    ['User', users], ['ProductReview', comments], ['Comment', comments], ['OrderNote', comments], ['OrderItem', items],
+    ['ProductCategory', terms], ['ProductTag', terms], ['Term', terms], ['AttributeTerm', terms], ['ShippingClass', terms], ['Menu', terms],
+  ];
+  for (const [table, id] of plan) {
+    if (id > 0) await prisma.$executeRawUnsafe('ALTER TABLE `' + table + '` AUTO_INCREMENT = ' + (id + 1));
+  }
+  log(`  reserved IDs: new orders/products/posts start after #${posts}, users after #${users}`);
+}
+
 async function run(opts = {}, logFn = console.log) {
   logger = logFn;
   acfDefs = null;
@@ -896,6 +928,7 @@ async function run(opts = {}, logFn = console.log) {
     if (should('taxes')) await migrateTaxesAndShipping();
     if (should('orders')) await migrateOrders();
     if (should('content')) await migrateContent();
+    await reserveIds();
     log(`Done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   } finally {
     await db.end();

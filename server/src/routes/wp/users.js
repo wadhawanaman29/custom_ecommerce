@@ -183,6 +183,7 @@ jwtAuth.post('/register', ah(async (req, res) => {
   const b = req.body || {};
   if (!b.password || String(b.password).length < 6) throw badRequest('registration-error-missing-password', 'Please enter an account password (min. 6 characters).');
   const user = await saveCustomer({ email: b.email, username: b.username, password: b.password, first_name: b.first_name, last_name: b.last_name, billing: b.billing, shipping: b.shipping }, null);
+  await require('../../services/email/triggers').newAccount(user);
   res.status(201).json({ token: signToken(user), customer: serializeCustomer(user, await store()) });
 }));
 
