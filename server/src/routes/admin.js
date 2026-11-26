@@ -42,7 +42,31 @@ router.get('/stats', can('view_woocommerce_reports'), ah(async (req, res) => {
     const r = map.get(d);
     series.push({ date: d, orders: r ? Number(r.orders) : 0, sales: r ? Number(r.sales) : 0 });
   }
+  // "WooCommerce Status" widget (same numbers as the WP dashboard widget)
+  const { lowStockThresholds, DEFAULT_EXCLUDED } = require('./analytics');
+  const t = await lowStockThresholds();
+  let excluded = await require('../lib/options').getOption('woocommerce_excluded_report_order_statuses', DEFAULT_EXCLUDED);
+  if (!Array.isArray(excluded)) excluded = DEFAULT_EXCLUDED;
+  const exStatuses = [...new Set([...excluded.map((x) => String(x).replace(/^wc-/, '')), 'trash', 'checkout-draft'])];
+  const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+  const [monthAgg, monthRefunds, topMonth, [lowCount]] = await Promise.all([
+    prisma.order.aggregate({ where: { createdAt: { gte: monthStart }, status: { notIn: exStatuses } }, _sum: { total: true, totalTax: true, shippingTotal: true } }),
+    prisma.orderRefund.aggregate({ where: { createdAt: { gte: monthStart }, order: { status: { notIn: exStatuses } } }, _sum: { amount: true } }),
+    prisma.orderItem.groupBy({ by: ['productId', 'name'], where: { type: 'line_item', productId: { not: null }, order: { createdAt: { gte: monthStart }, status: { notIn: exStatuses } } }, _sum: { quantity: true }, orderBy: { _sum: { quantity: 'desc' } }, take: 1 }),
+    prisma.$queryRawUnsafe("SELECT COUNT(*) AS c FROM Product p WHERE p.status = 'publish' AND p.manageStock = 1 AND p.stockQuantity <= COALESCE(p.lowStockAmount, ?) AND p.stockQuantity > ?", t.low, t.none),
+  ]);
+  const monthNet = Number(monthAgg._sum.total || 0) - Number(monthAgg._sum.totalTax || 0) - Number(monthAgg._sum.shippingTotal || 0) - Number(monthRefunds._sum.amount || 0);
+  const outOfStockAll = await prisma.product.count({ where: { stockStatus: 'outofstock', status: 'publish', OR: [{ type: { not: 'variable' } }, { manageStock: true }] } });
+
   res.json({
+    woo_status: {
+      net_sales_month: money(monthNet, s.dp),
+      top_seller_month: topMonth[0] ? { product_id: topMonth[0].productId, name: topMonth[0].name, quantity: topMonth[0]._sum.quantity } : null,
+      processing: (byStatus.find((b) => b.status === 'processing') || { _count: { _all: 0 } })._count._all,
+      on_hold: (byStatus.find((b) => b.status === 'on-hold') || { _count: { _all: 0 } })._count._all,
+      low_in_stock: Number(lowCount.c),
+      out_of_stock: outOfStockAll,
+    },
     currency: s.currency,
     period_days: days,
     sales: money(revenue._sum.total, s.dp),

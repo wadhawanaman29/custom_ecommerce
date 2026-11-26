@@ -12,6 +12,7 @@ const groups = [
   { id: 'account', label: 'Accounts & Privacy', description: '', parent_id: '', sub_groups: [] },
   { id: 'email', label: 'Emails', description: '', parent_id: '', sub_groups: [] },
   { id: 'advanced', label: 'Advanced', description: '', parent_id: '', sub_groups: [] },
+  { id: 'analytics', label: 'Analytics', description: '', parent_id: '', sub_groups: [] },
   { id: 'wp', label: 'WordPress', description: 'Site settings (Settings → General/Reading/Permalinks)', parent_id: '', sub_groups: [] },
 ];
 
@@ -115,6 +116,16 @@ const settings = [
   s('advanced', 'woocommerce_checkout_order_received_endpoint', 'Order received', 'text', 'order-received'),
   s('advanced', 'woocommerce_myaccount_orders_endpoint', 'Orders', 'text', 'orders'),
   s('advanced', 'woocommerce_api_enabled', 'Enable the legacy REST API', 'checkbox', 'no'),
+
+  // Analytics (WooCommerce → Analytics → Settings)
+  s('analytics', 'woocommerce_excluded_report_order_statuses', 'Excluded statuses', 'multiselect', ['pending', 'failed', 'cancelled'], { description: 'Orders with these statuses are excluded from all reports.' }),
+  s('analytics', 'woocommerce_actionable_order_statuses', 'Actionable statuses', 'multiselect', ['processing', 'on-hold'], { description: 'Orders with these statuses need attention from a store manager.' }),
+  s('analytics', 'woocommerce_default_date_range', 'Default date range', 'select', 'period=month&compare=previous_period', {
+    options: {
+      'period=today&compare=previous_period': 'Today', 'period=week&compare=previous_period': 'Week to date', 'period=month&compare=previous_period': 'Month to date',
+      'period=quarter&compare=previous_period': 'Quarter to date', 'period=year&compare=previous_period': 'Year to date', 'period=last_month&compare=previous_year': 'Last month vs previous year',
+    },
+  }),
 
   // WordPress core
   s('wp', 'blogname', 'Site Title', 'text', 'My Store'),

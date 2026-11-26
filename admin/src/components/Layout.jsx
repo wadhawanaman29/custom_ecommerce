@@ -12,13 +12,19 @@ const MENU = [
   { to: '/comments', label: 'Comments', icon: '✉', perm: 'content' },
   { label: 'WooCommerce', icon: '🛒', base: '/woo', perm: 'shop', children: [
     { to: '/orders', label: 'Orders' }, { to: '/customers', label: 'Customers' }, { to: '/coupons', label: 'Coupons' },
-    { to: '/reports', label: 'Reports' }, { to: '/woo/settings', label: 'Settings' },
+    { to: '/reports', label: 'Reports (legacy)' }, { to: '/woo/settings', label: 'Settings' },
   ] },
   { label: 'Products', icon: '▦', base: '/products', perm: 'shop', children: [
     { to: '/products', label: 'All Products', end: true }, { to: '/products/new', label: 'Add New' },
     { to: '/products/categories', label: 'Categories' }, { to: '/products/tags', label: 'Tags' },
     { to: '/products/attributes', label: 'Attributes' }, { to: '/products/shipping-classes', label: 'Shipping classes' },
     { to: '/products/reviews', label: 'Reviews' },
+  ] },
+  { label: 'Analytics', icon: '📊', base: '/analytics', perm: 'shop', children: [
+    { to: '/analytics/overview', label: 'Overview' }, { to: '/analytics/products', label: 'Products' }, { to: '/analytics/revenue', label: 'Revenue' },
+    { to: '/analytics/orders', label: 'Orders' }, { to: '/analytics/variations', label: 'Variations' }, { to: '/analytics/categories', label: 'Categories' },
+    { to: '/analytics/coupons', label: 'Coupons' }, { to: '/analytics/taxes', label: 'Taxes' }, { to: '/analytics/stock', label: 'Stock' },
+    { to: '/analytics/settings', label: 'Settings' },
   ] },
   { to: '/menus', label: 'Menus', icon: '☰', perm: 'settings' },
   { label: 'Users', icon: '👤', base: '/users', perm: 'users', children: [{ to: '/users', label: 'All Users', end: true }, { to: '/users/new', label: 'Add New' }] },

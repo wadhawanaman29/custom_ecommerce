@@ -19,3 +19,7 @@ server/uploads/*
 Thumbs.db
 .vscode/
 .idea/
+
+# Screenshots / reference images (may contain client data)
+/*.png
+/*.jpg

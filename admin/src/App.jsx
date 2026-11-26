@@ -28,6 +28,11 @@ import WooSettings from './pages/settings/WooSettings';
 import SiteSettings from './pages/settings/SiteSettings';
 import Reports from './pages/settings/Reports';
 import Import from './pages/tools/Import';
+import {
+  CategoriesReport, CouponsReport, OrdersReport, Overview, ProductsReport, RevenueReport, TaxesReport,
+} from './pages/analytics/Reports';
+import Stock from './pages/analytics/Stock';
+import AnalyticsSettings from './pages/analytics/AnalyticsSettings';
 import ApiKeys from './pages/tools/ApiKeys';
 
 export default function App() {
@@ -63,6 +68,17 @@ export default function App() {
         <Route path="coupons/new" element={<CouponEdit />} />
         <Route path="coupons/:id" element={<CouponEdit />} />
         <Route path="reports" element={<Reports />} />
+        <Route path="analytics" element={<Navigate to="/analytics/overview" replace />} />
+        <Route path="analytics/overview" element={<Overview />} />
+        <Route path="analytics/revenue" element={<RevenueReport />} />
+        <Route path="analytics/orders" element={<OrdersReport />} />
+        <Route path="analytics/products" element={<ProductsReport />} />
+        <Route path="analytics/variations" element={<ProductsReport variations key="variations" />} />
+        <Route path="analytics/categories" element={<CategoriesReport />} />
+        <Route path="analytics/coupons" element={<CouponsReport />} />
+        <Route path="analytics/taxes" element={<TaxesReport />} />
+        <Route path="analytics/stock" element={<Stock />} />
+        <Route path="analytics/settings" element={<AnalyticsSettings />} />
         <Route path="woo/settings" element={<WooSettings />} />
         <Route path="woo/settings/:tab" element={<WooSettings />} />
 

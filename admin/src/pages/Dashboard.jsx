@@ -46,6 +46,27 @@ export default function Dashboard() {
           </div>
           <div className="dashboard-grid">
             <div>
+              {stats.woo_status && (
+                <div className="postbox woo-status">
+                  <div className="postbox-header"><span>WooCommerce Status</span></div>
+                  <Link className="ws-row" to="/analytics/revenue?period=month&chart=net_revenue">
+                    <span className="ws-icon" aria-hidden="true">📊</span>
+                    <span><strong className="ws-value">{price(stats.woo_status.net_sales_month)}</strong><small>net sales this month</small></span>
+                  </Link>
+                  {stats.woo_status.top_seller_month && (
+                    <Link className="ws-row" to={`/products/${stats.woo_status.top_seller_month.product_id}`}>
+                      <span className="ws-icon" aria-hidden="true">📦</span>
+                      <span><strong className="ws-value">{stats.woo_status.top_seller_month.name}</strong><small>top seller this month (sold {stats.woo_status.top_seller_month.quantity})</small></span>
+                    </Link>
+                  )}
+                  <div className="ws-grid">
+                    <Link className="ws-row" to="/orders?status=processing"><span className="ws-icon ws-green" aria-hidden="true">•••</span><span><strong className="ws-value">{stats.woo_status.processing} order{stats.woo_status.processing === 1 ? '' : 's'}</strong><small>awaiting processing</small></span></Link>
+                    <Link className="ws-row" to="/orders?status=on-hold"><span className="ws-icon ws-grey" aria-hidden="true">−</span><span><strong className="ws-value">{stats.woo_status.on_hold} order{stats.woo_status.on_hold === 1 ? '' : 's'}</strong><small>on-hold</small></span></Link>
+                    <Link className="ws-row" to="/analytics/stock?type=lowstock"><span className="ws-icon ws-yellow" aria-hidden="true">!</span><span><strong className="ws-value">{stats.woo_status.low_in_stock} product{stats.woo_status.low_in_stock === 1 ? '' : 's'}</strong><small>low in stock</small></span></Link>
+                    <Link className="ws-row" to="/analytics/stock?type=outofstock"><span className="ws-icon ws-red" aria-hidden="true">✕</span><span><strong className="ws-value">{stats.woo_status.out_of_stock} product{stats.woo_status.out_of_stock === 1 ? '' : 's'}</strong><small>out of stock</small></span></Link>
+                  </div>
+                </div>
+              )}
               <Postbox title="Sales by day"><SalesChart series={stats.series} /><p className="muted">Paid orders (processing, completed, on hold). Hover a bar for details.</p></Postbox>
               <Postbox title="Recent orders" actions={<Link to="/orders">View all</Link>}>
                 <table className="wp-list-table">

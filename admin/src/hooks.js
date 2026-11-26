@@ -39,7 +39,7 @@ export function useQueryState(defaults) {
   for (const k of Object.keys(defaults)) if (sp.get(k) !== null) state[k] = sp.get(k);
   const update = (patch) => {
     const next = { ...state, ...patch };
-    if (!('page' in patch)) next.page = '1';
+    if ('page' in defaults && !('page' in patch)) next.page = '1';
     const out = {};
     for (const [k, v] of Object.entries(next)) if (v !== '' && v !== undefined && v !== null && String(v) !== String(defaults[k])) out[k] = v;
     setSp(out, { replace: true });

@@ -213,3 +213,57 @@ th.sortable:hover { color: var(--primary); }
   .product-data { flex-direction: column; }
   .product-data .tabs { width: 100%; flex-basis: auto; display: flex; flex-wrap: wrap; }
 }
+
+/* ───────── WooCommerce Status widget ───────── */
+.woo-status .ws-row { display: flex; gap: 12px; align-items: center; padding: 12px 14px; border-top: 1px solid #f0f0f1; color: var(--text); text-decoration: none; }
+.woo-status .ws-row:hover { background: #f6f7f7; text-decoration: none; }
+.woo-status .ws-row small { display: block; color: var(--muted); font-size: 12px; }
+.woo-status .ws-value { color: var(--primary); font-size: 19px; font-weight: 400; }
+.woo-status .ws-icon { width: 28px; height: 28px; flex: 0 0 28px; display: flex; align-items: center; justify-content: center; border-radius: 50%; font-weight: 700; font-size: 13px; }
+.woo-status .ws-green { background: #5ec27e; color: #fff; }
+.woo-status .ws-grey { background: #a7aaad; color: #fff; }
+.woo-status .ws-yellow { background: #f0b849; color: #fff; }
+.woo-status .ws-red { background: #d63638; color: #fff; }
+.woo-status .ws-grid { display: grid; grid-template-columns: 1fr 1fr; }
+.woo-status .ws-grid .ws-row:nth-child(odd) { border-right: 1px solid #f0f0f1; }
+
+/* ───────── Analytics ───────── */
+.date-range { position: relative; display: flex; flex-direction: column; gap: 4px; margin: 4px 0 16px; max-width: 320px; }
+.date-range-button { display: grid; grid-template-columns: 1fr auto; text-align: left; background: #fff; border: 1px solid var(--border); padding: 8px 12px; cursor: pointer; border-radius: 2px; }
+.date-range-button .primary { color: var(--primary); font-size: 13px; }
+.date-range-button .secondary { color: var(--primary); font-size: 11px; grid-column: 1; }
+.date-range-button > span[aria-hidden] { grid-row: 1 / span 2; grid-column: 2; align-self: center; color: var(--primary); }
+.date-range-pop { position: absolute; top: 100%; left: 0; z-index: 30; background: #fff; border: 1px solid var(--border-light); box-shadow: 0 2px 10px rgba(0,0,0,.15); width: 320px; }
+.date-range-pop .seg { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--border-light); }
+.date-range-pop .seg button { padding: 10px; border: 0; background: #fff; cursor: pointer; font: inherit; border-bottom: 2px solid transparent; }
+.date-range-pop .seg button.on { border-bottom-color: var(--primary); font-weight: 600; }
+.preset-grid { display: grid; grid-template-columns: 1fr 1fr; }
+.preset-grid button { text-align: left; padding: 10px 14px; border: 0; border-bottom: 1px solid #f0f0f1; border-right: 1px solid #f0f0f1; background: #f6f7f7; color: #50575e; cursor: pointer; font: inherit; }
+.preset-grid button:hover { background: #eef4fa; }
+.preset-grid button.on { background: #fff; color: var(--text); font-weight: 600; }
+.preset-grid button.on::before { content: ''; display: inline-block; width: 8px; height: 8px; background: var(--primary); margin-right: 8px; }
+.summary-numbers { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); border: 1px solid var(--border); border-bottom: 0; border-right: 0; background: #fff; margin-bottom: 20px; }
+.summary-number { text-align: left; padding: 18px 20px; background: #fff; border: 0; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); border-top: 3px solid transparent; cursor: pointer; font: inherit; color: var(--text); display: flex; flex-direction: column; gap: 6px; }
+.summary-number:hover { background: #f6f7f7; }
+.summary-number.selected { border-top-color: var(--primary); background: #fff; }
+.summary-number .label { font-size: 13px; color: #50575e; }
+.summary-number .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.summary-number .value { font-size: 20px; }
+.summary-number .prev { font-size: 11px; }
+.delta { font-size: 11px; padding: 2px 6px; border-radius: 2px; background: #f0f0f1; color: #50575e; white-space: nowrap; }
+.delta.up { background: #4ab866; color: #fff; }
+.delta.down { background: #d94f4f; color: #fff; }
+.chart-box .postbox-header { flex-wrap: wrap; gap: 8px; }
+.legend { display: inline-flex; align-items: center; gap: 6px; font-weight: 400; color: #50575e; margin-left: 14px; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.report-chart { position: relative; height: 300px; padding: 0 0 22px 0; }
+.report-chart svg { width: 100%; height: 280px; display: block; }
+.chart-yaxis span { position: absolute; left: 0; transform: translateY(-50%); font-size: 11px; color: var(--muted); }
+.chart-xaxis { position: absolute; left: 0; right: 0; bottom: 0; height: 20px; }
+.chart-xaxis span { position: absolute; transform: translateX(-50%); font-size: 11px; color: var(--muted); white-space: nowrap; }
+.chart-tip { position: absolute; top: 10px; background: #fff; border: 1px solid var(--border-light); box-shadow: 0 2px 8px rgba(0,0,0,.15); padding: 8px 10px; font-size: 12px; pointer-events: none; min-width: 180px; z-index: 5; }
+.chart-tip div { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.report-table td.right, .report-table th.right { text-align: right; }
+.report-pager { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px; border-top: 1px solid var(--border-light); flex-wrap: wrap; }
+.report-summary { display: flex; justify-content: center; flex-wrap: wrap; gap: 18px; padding: 12px; border-top: 1px solid var(--border-light); background: #fafafa; }
+.report-summary strong { font-weight: 600; }
