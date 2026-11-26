@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useParams } from 'react-router-dom';
 import { api, custom } from './api';
 import { useAuth } from './auth';
 import { setCurrency } from './format';
@@ -33,6 +33,21 @@ import {
 } from './pages/analytics/Reports';
 import Stock from './pages/analytics/Stock';
 import AnalyticsSettings from './pages/analytics/AnalyticsSettings';
+import ContentList from './pages/content/ContentList';
+import ContentEdit from './pages/content/ContentEdit';
+import ContentTypes from './pages/tools/ContentTypes';
+import { ContentTypesProvider, useContentTypes } from './contentTypes';
+import { wp } from './api';
+
+// Custom taxonomy screen (e.g. Frontend Menu Categories)
+function CustomTaxonomyPage() {
+  const { tax } = useParams();
+  const { registry } = useContentTypes();
+  if (!registry) return <Loading />;
+  const t = registry.taxonomies.find((x) => x.name === tax);
+  if (!t) return <div className="notice notice-error"><span>Unknown taxonomy.</span></div>;
+  return <TermsPage key={t.name} cfg={{ taxonomy: t.name, title: t.label, singular: (t.singular_label || t.label).toLowerCase(), path: wp(t.rest_base || t.name), hierarchical: !!t.hierarchical, wp: true }} />;
+}
 import ApiKeys from './pages/tools/ApiKeys';
 
 export default function App() {
@@ -45,6 +60,7 @@ export default function App() {
   if (!user) return <Login />;
 
   return (
+    <ContentTypesProvider>
     <Routes>
       <Route element={<Layout />}>
         <Route index element={<Dashboard />} />
@@ -100,10 +116,16 @@ export default function App() {
 
         <Route path="tools/import" element={<Import />} />
         <Route path="tools/api-keys" element={<ApiKeys />} />
+        <Route path="tools/content-types" element={<ContentTypes />} />
+        <Route path="content/:type" element={<ContentList />} />
+        <Route path="content/:type/new" element={<ContentEdit />} />
+        <Route path="content/:type/tax/:tax" element={<CustomTaxonomyPage />} />
+        <Route path="content/:type/:id" element={<ContentEdit key="edit" />} />
         <Route path="settings" element={<SiteSettings section="general" />} />
         <Route path="settings/reading" element={<SiteSettings section="reading" />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
+    </ContentTypesProvider>
   );
 }

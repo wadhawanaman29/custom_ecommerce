@@ -253,19 +253,63 @@ async function relationships(ttids) {
   return q(`SELECT object_id AS obj, term_taxonomy_id AS ttid FROM ${T('term_relationships')} WHERE term_taxonomy_id IN (?)`, [ttids]);
 }
 
+// ── ACF / CPT UI definitions (loaded once per run, merged into the content-type registry) ──
+let acfDefs = null;
+async function loadAcfDefinitions() {
+  if (acfDefs) return acfDefs;
+  const acf = require('./acf');
+  const ct = require('../../lib/content-types');
+  const [defs, groups] = await Promise.all([acf.postTypesFromDb(q, T), acf.fieldGroupsFromDb(q, T)]);
+  const reg = await ct.getRegistry();
+  if (defs.types.length || defs.taxonomies.length || groups.length) {
+    const defaultKeys = new Set(ct.DEFAULTS.field_groups.map((g) => g.key));
+    const merge = (list, add, id) => { const m = new Map(list.map((x) => [x[id], x])); for (const a of add) m.set(a[id], { ...(m.get(a[id]) || {}), ...a }); return [...m.values()]; };
+    // Real ACF groups from WordPress replace the built-in defaults
+    const baseGroups = groups.length ? reg.field_groups.filter((g) => !defaultKeys.has(g.key)) : reg.field_groups;
+    try {
+      await ct.saveRegistry({
+        types: merge(reg.types, defs.types.filter((t) => !ct.BUILTIN_TYPES.includes(t.name)), 'name'),
+        taxonomies: merge(reg.taxonomies, defs.taxonomies, 'name'),
+        field_groups: merge(baseGroups, groups, 'key'),
+      });
+      log(`  content types: ${defs.types.length} post types, ${defs.taxonomies.length} taxonomies, ${groups.length} ACF field groups`);
+    } catch (e) {
+      log(`  ! could not save content types: ${e.message}`);
+    }
+  }
+  const saved = await ct.getRegistry();
+  acfDefs = { registry: saved, fields: acf.topLevelFields(saved.field_groups), acf };
+  return acfDefs;
+}
+
+// Visible meta + nested ACF values ("acf:<name>") for posts and terms
+async function contentMeta(m) {
+  const { fields, acf } = await loadAcfDefinitions();
+  if (!m || !m.size) return [];
+  if (!fields.length) return publicMeta(m);
+  const { values, managedKeys } = acf.acfValues(m, fields);
+  const base = publicMeta(m).filter((x) => !managedKeys.has(x.key.replace(/^acf:/, '')));
+  let id = base.reduce((n, x) => Math.max(n, x.id || 0), 0);
+  return [...base, ...Object.entries(values).map(([key, value]) => ({ id: ++id, key: `acf:${key}`, value }))];
+}
+
 async function migrateCatalogTerms() {
   log('Product categories, tags, shipping classes, attributes…');
   const mediaIds = new Set((await prisma.media.findMany({ select: { id: true } })).map((m) => m.id));
   const cats = await termsOf('product_cat');
   const tmeta = await metaFor('termmeta', 'term_id', cats.map((c) => c.id));
-  await insertMany('productCategory', cats.map((c) => {
+  const catRows = [];
+  for (const c of cats) {
     const m = tmeta.get(c.id) || new Map();
     const img = parseInt(m.get('thumbnail_id'), 10);
-    return {
+    const known = new Set(['thumbnail_id', 'display_type', 'order', 'product_count_product_cat']);
+    catRows.push({
       id: c.id, name: c.name, slug: c.slug, description: c.description || '', display: m.get('display_type') || 'default',
       imageId: mediaIds.has(img) ? img : null, menuOrder: parseInt(m.get('order'), 10) || 0,
-    };
-  }));
+      meta: (await contentMeta(new Map([...m].filter(([k]) => !known.has(k))))),
+    });
+  }
+  await insertMany('productCategory', catRows);
   for (const c of cats.filter((x) => x.parent)) {
     await prisma.productCategory.updateMany({ where: { id: c.id }, data: { parentId: c.parent } });
   }
@@ -695,35 +739,49 @@ async function migrateOrders() {
 }
 
 async function migrateContent() {
-  log('Posts, pages, categories, tags, comments, menus…');
+  log('Posts, pages, custom post types, categories, tags, comments, menus…');
+  const { registry } = await loadAcfDefinitions();
+  const customTypes = registry.types.map((t) => t.name).filter((n) => /^[a-z0-9_-]{1,20}$/.test(n));
+  const customTaxes = registry.taxonomies.map((t) => t.name).filter((n) => !['category', 'post_tag', 'product_cat', 'product_tag', 'product_shipping_class'].includes(n) && !n.startsWith('pa_'));
   const userIds = new Set((await prisma.user.findMany({ select: { id: true } })).map((u) => u.id));
   const cats = await termsOf('category');
   const tags = await termsOf('post_tag');
-  await insertMany('term', [...cats.map((t) => ({ id: t.id, taxonomy: 'category', name: t.name, slug: t.slug, description: t.description || '', parentId: t.parent || 0 })),
-    ...tags.map((t) => ({ id: t.id, taxonomy: 'post_tag', name: t.name, slug: t.slug, description: t.description || '' }))]);
+  const customTerms = [];
+  for (const tx of customTaxes) customTerms.push(...(await termsOf(tx)).map((t) => ({ ...t, taxonomy: tx })));
+  const customTermMeta = await metaFor('termmeta', 'term_id', customTerms.map((t) => t.id));
+  const termRows = [...cats.map((t) => ({ id: t.id, taxonomy: 'category', name: t.name, slug: t.slug, description: t.description || '', parentId: t.parent || 0 })),
+    ...tags.map((t) => ({ id: t.id, taxonomy: 'post_tag', name: t.name, slug: t.slug, description: t.description || '' }))];
+  for (const t of customTerms) {
+    termRows.push({ id: t.id, taxonomy: t.taxonomy, name: t.name, slug: t.slug, description: t.description || '', parentId: t.parent || 0, meta: await contentMeta(customTermMeta.get(t.id)) });
+  }
+  await insertMany('term', termRows);
+  if (customTerms.length) log(`  ${customTerms.length} terms in custom taxonomies (${customTaxes.join(', ')})`);
 
   const stickyRow = await q(`SELECT option_value AS v FROM ${T('options')} WHERE option_name = 'sticky_posts'`);
   const sticky = new Set(toArr((stickyRow[0] || {}).v).map(Number));
-  const posts = await q(`SELECT ID, post_author, post_title, post_name, post_content, post_excerpt, post_status, post_parent, menu_order, comment_status, ping_status, post_password, post_type, post_date_gmt, post_date, post_modified_gmt FROM ${T('posts')} WHERE post_type IN ('post','page') AND post_status NOT IN ('auto-draft','inherit')`);
+  const postTypes = ['post', 'page', ...customTypes];
+  const posts = await q(`SELECT ID, post_author, post_title, post_name, post_content, post_excerpt, post_status, post_parent, menu_order, comment_status, ping_status, post_password, post_type, post_date_gmt, post_date, post_modified_gmt FROM ${T('posts')} WHERE post_type IN (?) AND post_status NOT IN ('auto-draft','inherit')`, [postTypes]);
   const meta = await metaFor('postmeta', 'post_id', posts.map((p) => p.ID));
   const fmtTerms = await termsOf('post_format');
   const fmtRels = await relationships(fmtTerms.map((t) => t.ttid));
-  const rows = posts.map((p) => {
+  const rows = [];
+  for (const p of posts) {
     const m = meta.get(p.ID) || new Map();
     const fmt = fmtRels.find((r) => r.obj === p.ID);
     const fmtTerm = fmt ? fmtTerms.find((t) => t.ttid === fmt.ttid) : null;
-    return {
+    rows.push({
       id: p.ID, type: p.post_type, title: p.post_title || '', slug: p.post_name || String(p.ID), content: p.post_content || '', excerpt: p.post_excerpt || '',
       status: p.post_status, authorId: userIds.has(p.post_author) ? p.post_author : null, parentId: p.post_parent || 0, menuOrder: p.menu_order || 0,
       featuredMediaId: parseInt(m.get('_thumbnail_id'), 10) || 0, template: m.get('_wp_page_template') === 'default' ? '' : m.get('_wp_page_template') || '',
       commentStatus: p.comment_status || 'closed', pingStatus: p.ping_status || 'closed', sticky: sticky.has(p.ID),
       format: fmtTerm ? fmtTerm.slug.replace('post-format-', '') : 'standard', password: p.post_password || '',
-      meta: publicMeta(m), createdAt: gmt(p.post_date_gmt) || gmt(p.post_date) || new Date(), updatedAt: gmt(p.post_modified_gmt) || new Date(),
-    };
-  });
-  log(`  ${await insertMany('post', rows)} posts/pages`);
-  const rels = await relationships([...cats, ...tags].map((t) => t.ttid));
-  const ttid = new Map([...cats, ...tags].map((t) => [t.ttid, t.id]));
+      meta: await contentMeta(m), createdAt: gmt(p.post_date_gmt) || gmt(p.post_date) || new Date(), updatedAt: gmt(p.post_modified_gmt) || new Date(),
+    });
+  }
+  const byType = rows.reduce((acc, r) => ({ ...acc, [r.type]: (acc[r.type] || 0) + 1 }), {});
+  log(`  ${await insertMany('post', rows)} new posts (${Object.entries(byType).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'})`);
+  const rels = await relationships([...cats, ...tags, ...customTerms].map((t) => t.ttid));
+  const ttid = new Map([...cats, ...tags, ...customTerms].map((t) => [t.ttid, t.id]));
   const postIds = new Set(rows.map((r) => r.id));
   log(`  ${await linkMany('_PostToTerm', 'Post', rels.filter((r) => postIds.has(r.obj)).map((r) => [r.obj, ttid.get(r.ttid)]))} term links`);
 
@@ -771,6 +829,7 @@ async function reset() {
 
 async function run(opts = {}, logFn = console.log) {
   logger = logFn;
+  acfDefs = null;
   P = opts.prefix || 'wp_';
   ONLY = opts.only && opts.only.length ? opts.only : null;
   REMOTE_MEDIA = !!opts.remoteMedia;

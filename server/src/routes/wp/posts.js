@@ -77,8 +77,15 @@ function sizesOut(m) {
   return out;
 }
 
-function termOut(t, count) {
+function termOut(t, count, cfg) {
   const isCat = t.taxonomy === 'category';
+  if (cfg) {
+    return {
+      id: t.id, count, description: t.description, link: `${config.frontendUrl}/${t.taxonomy}/${t.slug}/`, name: t.name, slug: t.slug, taxonomy: t.taxonomy,
+      ...(cfg.hierarchical ? { parent: t.parentId } : {}), meta: [], acf: acfObject(t.meta),
+      _links: { self: [{ href: `${WP}/${cfg.base}/${t.id}` }], collection: [{ href: `${WP}/${cfg.base}` }] },
+    };
+  }
   return {
     id: t.id,
     count,
@@ -95,7 +102,8 @@ function termOut(t, count) {
 
 function postOut(p, s, req, extra = {}) {
   const isPage = p.type === 'page';
-  const base = isPage ? 'pages' : 'posts';
+  const cfg = extra.cfg;
+  const base = cfg ? cfg.base : isPage ? 'pages' : 'posts';
   const isProtected = !!p.password;
   const canEdit = req && req.user && (userCan(req.user, isPage ? 'edit_others_pages' : 'edit_others_posts') || p.authorId === req.user.id);
   const unlocked = !isProtected || canEdit || (req && req.query.password === p.password);
@@ -118,16 +126,18 @@ function postOut(p, s, req, extra = {}) {
     excerpt: { rendered: unlocked ? (p.excerpt ? autop(p.excerpt) : autoExcerpt(p.content)) : '', protected: isProtected },
     author: p.authorId || 0,
     featured_media: p.featuredMediaId || 0,
-    ...(isPage ? { parent: p.parentId, menu_order: p.menuOrder } : {}),
+    ...(isPage || cfg ? { parent: p.parentId, menu_order: p.menuOrder } : {}),
     comment_status: p.commentStatus,
     ping_status: p.pingStatus,
     ...(isPage ? {} : { sticky: p.sticky, format: p.format }),
     template: p.template,
     meta: metaObject(p.meta),
-    ...(isPage ? {} : {
+    ...(isPage || cfg ? {} : {
       categories: (p.terms || []).filter((t) => t.taxonomy === 'category').map((t) => t.id),
       tags: (p.terms || []).filter((t) => t.taxonomy === 'post_tag').map((t) => t.id),
     }),
+    // Custom taxonomies: { <rest_base>: [termIds] } like WordPress
+    ...(cfg ? Object.fromEntries(cfg.taxonomies.map((tx) => [tx.rest_base, (p.terms || []).filter((t) => t.taxonomy === tx.name).map((t) => t.id)])) : {}),
     acf: acfObject(p.meta),
     _links: {
       self: [{ href: `${WP}/${base}/${p.id}` }],
@@ -204,7 +214,8 @@ async function pagePaths(pages) {
 }
 
 // ───────── Posts & pages ─────────
-function postRouter(type) {
+// cfg (custom post types): { base, taxonomies: [{ name, rest_base }] }
+function postRouter(type, cfg = null) {
   const router = express.Router();
   const editCap = type === 'page' ? 'edit_pages' : 'edit_posts';
   const editOthers = type === 'page' ? 'edit_others_pages' : 'edit_others_posts';
@@ -215,7 +226,7 @@ function postRouter(type) {
     const embed = has(req.query, '_embed') ? await embedFor(rows, s) : null;
     const paths = type === 'page' ? await pagePaths(rows) : new Map();
     return rows.map((p) => {
-      const o = postOut(p, s, req, { pagePath: paths.get(p.id) });
+      const o = postOut(p, s, req, { pagePath: paths.get(p.id), cfg });
       if (embed) o._embedded = embed(p);
       return o;
     });
@@ -246,6 +257,10 @@ function postRouter(type) {
     if (q.tags) AND.push({ terms: { some: { taxonomy: 'post_tag', id: { in: idList(q.tags) || [] } } } });
     if (q.categories_exclude) AND.push({ terms: { none: { taxonomy: 'category', id: { in: idList(q.categories_exclude) || [] } } } });
     if (q.tags_exclude) AND.push({ terms: { none: { taxonomy: 'post_tag', id: { in: idList(q.tags_exclude) || [] } } } });
+    for (const tx of (cfg ? cfg.taxonomies : [])) {
+      if (q[tx.rest_base]) AND.push({ terms: { some: { taxonomy: tx.name, id: { in: idList(q[tx.rest_base]) || [] } } } });
+      if (q[`${tx.rest_base}_exclude`]) AND.push({ terms: { none: { taxonomy: tx.name, id: { in: idList(q[`${tx.rest_base}_exclude`]) || [] } } } });
+    }
     if (q.after) AND.push({ createdAt: { gt: parseWpDate(q.after, false, s.gmtOffset) } });
     if (q.before) AND.push({ createdAt: { lt: parseWpDate(q.before, false, s.gmtOffset) } });
     if (q.modified_after) AND.push({ updatedAt: { gt: parseWpDate(q.modified_after, false, s.gmtOffset) } });
@@ -308,6 +323,13 @@ function postRouter(type) {
       for (const [key, value] of Object.entries(body.meta)) if (value !== null) list.push({ id: ++id, key, value });
       d.meta = list;
     }
+    // ACF values: { acf: { field_name: value } } → meta "acf:field_name" (null removes)
+    if (has(body, 'acf') && body.acf && typeof body.acf === 'object') {
+      const list = (d.meta || (Array.isArray(existing?.meta) ? existing.meta : [])).filter((m) => !(m.key && m.key.startsWith('acf:') && has(body.acf, m.key.slice(4))));
+      let id = list.reduce((n, m) => Math.max(n, m.id || 0), 0);
+      for (const [key, value] of Object.entries(body.acf)) if (value !== null) list.push({ id: ++id, key: `acf:${key}`, value });
+      d.meta = list;
+    }
     if (!existing || has(body, 'slug') || (d.title && !existing.slug)) {
       const baseSlug = body.slug || d.title || existing?.title || `${type}-${Date.now()}`;
       d.slug = await uniqueSlug(baseSlug, async (slug) => !!(await prisma.post.findFirst({ where: { type, slug, NOT: existing ? { id: existing.id } : undefined } })));
@@ -320,6 +342,19 @@ function postRouter(type) {
       if (!existing && !has(body, 'categories')) {
         const uncategorized = await prisma.term.findFirst({ where: { taxonomy: 'category', slug: 'uncategorized' } });
         if (uncategorized) { terms.push(uncategorized.id); touched = true; }
+      }
+      if (touched) d.terms = { set: [...new Set(terms)].map((id) => ({ id })) };
+    }
+    if (cfg && cfg.taxonomies.length) {
+      const terms = [];
+      let touched = false;
+      for (const tx of cfg.taxonomies) {
+        if (has(body, tx.rest_base)) {
+          touched = true;
+          const ids = idList(body[tx.rest_base]) || [];
+          const valid = ids.length ? await prisma.term.findMany({ where: { id: { in: ids }, taxonomy: tx.name }, select: { id: true } }) : [];
+          terms.push(...valid.map((t) => t.id));
+        } else if (existing) terms.push(...existing.terms.filter((t) => t.taxonomy === tx.name).map((t) => t.id));
       }
       if (touched) d.terms = { set: [...new Set(terms)].map((id) => ({ id })) };
     }
@@ -361,9 +396,12 @@ function postRouter(type) {
 }
 
 // ───────── Categories & tags ─────────
-function taxonomyRouter(taxonomy) {
+// cfg (custom taxonomies): { base, hierarchical }
+function taxonomyRouter(taxonomy, cfg = null) {
   const router = express.Router();
-  const base = taxonomy === 'category' ? 'categories' : 'tags';
+  const base = cfg ? cfg.base : taxonomy === 'category' ? 'categories' : 'tags';
+  const hierarchical = cfg ? cfg.hierarchical : taxonomy === 'category';
+  const out = (t, count) => termOut(t, count, cfg);
   const find = async (id) => {
     const t = await prisma.term.findUnique({ where: { id: intParam(id, 'rest_term_invalid') } });
     if (!t || t.taxonomy !== taxonomy) throw new ApiError(404, 'rest_term_invalid', 'Term does not exist.');
@@ -379,7 +417,7 @@ function taxonomyRouter(taxonomy) {
     if (c.exclude) where.id = { ...(where.id || {}), notIn: c.exclude };
     if (c.search) where.OR = [{ name: { contains: c.search } }, { slug: { contains: c.search } }];
     if (q.slug) where.slug = { in: strList(q.slug) };
-    if (taxonomy === 'category' && q.parent !== undefined) where.parentId = parseInt(q.parent, 10) || 0;
+    if (hierarchical && q.parent !== undefined) where.parentId = parseInt(q.parent, 10) || 0;
     if (q.post) where.posts = { some: { id: parseInt(q.post, 10) } };
     if (bool(q.hide_empty)) where.posts = { some: { status: 'publish' } };
     const orderBy = c.orderby === 'id' ? { id: c.order } : c.orderby === 'slug' ? { slug: c.order } : c.orderby === 'count' ? { posts: { _count: c.order } } : { name: c.order };
@@ -388,31 +426,37 @@ function taxonomyRouter(taxonomy) {
       prisma.term.findMany({ where, orderBy, skip: c.skip, take: c.take, include: { _count: { select: { posts: { where: { status: 'publish' } } } } } }),
     ]);
     setPaginationHeaders(req, res, total, c);
-    res.json(rows.map((t) => termOut(t, t._count.posts)));
+    res.json(rows.map((t) => out(t, t._count.posts)));
   }));
   async function save(body, existing) {
     const d = {};
     if (has(body, 'name')) d.name = String(body.name);
     if (!existing && !d.name) throw badRequest('rest_missing_callback_param', 'Missing parameter(s): name');
     if (has(body, 'description')) d.description = String(body.description);
-    if (taxonomy === 'category' && has(body, 'parent')) d.parentId = parseInt(body.parent, 10) || 0;
+    if (hierarchical && has(body, 'parent')) d.parentId = parseInt(body.parent, 10) || 0;
+    if (has(body, 'acf') && body.acf && typeof body.acf === 'object') {
+      const list = (Array.isArray(existing?.meta) ? existing.meta : []).filter((m) => !(m.key && m.key.startsWith('acf:') && has(body.acf, m.key.slice(4))));
+      let id = list.reduce((n, m) => Math.max(n, m.id || 0), 0);
+      for (const [key, value] of Object.entries(body.acf)) if (value !== null) list.push({ id: ++id, key: `acf:${key}`, value });
+      d.meta = list;
+    }
     if (!existing || has(body, 'slug')) {
       d.slug = await uniqueSlug(body.slug || d.name, async (slug) => !!(await prisma.term.findFirst({ where: { taxonomy, slug, NOT: existing ? { id: existing.id } : undefined } })));
     }
     return existing ? prisma.term.update({ where: { id: existing.id }, data: d }) : prisma.term.create({ data: { ...d, taxonomy } });
   }
-  router.post('/', can('manage_categories'), ah(async (req, res) => { const t = await save(req.body || {}, null); res.status(201).json(termOut(t, 0)); }));
-  router.get('/:id(\\d+)', cached(), ah(async (req, res) => { const t = await find(req.params.id); res.json(termOut(t, await countOf(t))); }));
-  const update = ah(async (req, res) => { const t = await save(req.body || {}, await find(req.params.id)); res.json(termOut(t, await countOf(t))); });
+  router.post('/', can('manage_categories'), ah(async (req, res) => { const t = await save(req.body || {}, null); res.status(201).json(out(t, 0)); }));
+  router.get('/:id(\\d+)', cached(), ah(async (req, res) => { const t = await find(req.params.id); res.json(out(t, await countOf(t))); }));
+  const update = ah(async (req, res) => { const t = await save(req.body || {}, await find(req.params.id)); res.json(out(t, await countOf(t))); });
   router.post('/:id(\\d+)', can('manage_categories'), update);
   router.put('/:id(\\d+)', can('manage_categories'), update);
   router.patch('/:id(\\d+)', can('manage_categories'), update);
   router.delete('/:id(\\d+)', can('manage_categories'), ah(async (req, res) => {
     if (!bool(req.query.force ?? req.body?.force)) throw new ApiError(501, 'rest_trash_not_supported', `Terms do not support trashing. Set 'force=true' to delete.`);
     const t = await find(req.params.id);
-    const out = termOut(t, await countOf(t));
+    const previous = out(t, await countOf(t));
     await prisma.term.delete({ where: { id: t.id } });
-    res.json({ deleted: true, previous: out });
+    res.json({ deleted: true, previous });
   }));
   router.base = base;
   return router;
@@ -497,7 +541,33 @@ comments.delete('/:id(\\d+)', can('moderate_comments'), ah(async (req, res) => {
   res.json(commentOut(await prisma.comment.update({ where: { id: c.id }, data: { status: 'trash' } }), s));
 }));
 
+// /wp/v2/<rest_base> for every registered custom post type / taxonomy (rebuilt when the registry changes)
+function dynamicContentRouter() {
+  const ct = require('../../lib/content-types');
+  let cache = { version: -1, routers: new Map() };
+  return ah(async (req, res, next) => {
+    const reg = await ct.getRegistry();
+    if (cache.version !== ct.getVersion()) cache = { version: ct.getVersion(), routers: new Map() };
+    const base = req.params.base;
+    let router = cache.routers.get(base);
+    if (!router) {
+      const type = reg.types.find((t) => (t.rest_base || t.name) === base);
+      const tax = reg.taxonomies.find((t) => (t.rest_base || t.name) === base);
+      if (type) {
+        const taxonomies = reg.taxonomies.filter((t) => (type.taxonomies || []).includes(t.name) || (t.object_types || []).includes(type.name))
+          .map((t) => ({ name: t.name, rest_base: t.rest_base || t.name }));
+        router = postRouter(type.name, { base, taxonomies });
+      } else if (tax) {
+        router = taxonomyRouter(tax.name, { base, hierarchical: !!tax.hierarchical });
+      } else return next();
+      cache.routers.set(base, router);
+    }
+    return router(req, res, next);
+  });
+}
+
 module.exports = {
+  dynamicContentRouter,
   posts: postRouter('post'), pages: postRouter('page'), categories: taxonomyRouter('category'), tags: taxonomyRouter('post_tag'),
   comments, mediaOut, userPublic, gravatar,
 };

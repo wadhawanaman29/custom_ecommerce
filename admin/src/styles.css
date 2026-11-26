@@ -267,3 +267,11 @@ th.sortable:hover { color: var(--primary); }
 .report-pager { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 12px; border-top: 1px solid var(--border-light); flex-wrap: wrap; }
 .report-summary { display: flex; justify-content: center; flex-wrap: wrap; gap: 18px; padding: 12px; border-top: 1px solid var(--border-light); background: #fafafa; }
 .report-summary strong { font-weight: 600; }
+
+/* ───────── ACF-style fields ───────── */
+.acf-group { border: 1px solid var(--border-light); padding: 12px; background: #fff; }
+.acf-field { margin-bottom: 16px; }
+.acf-field > label { font-weight: 600; }
+.acf-table td { vertical-align: middle; background: #fff !important; }
+.acf-table th { background: #f6f7f7; font-size: 13px; }
+.acf-repeater .right { margin: 6px 0 0; }

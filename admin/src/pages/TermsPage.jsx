@@ -3,21 +3,23 @@ import { api, fetchAll, wc, wp } from '../api';
 import { useCollection, useNotice, useQueryState } from '../hooks';
 import { decodeHtml } from '../format';
 import { ImageField } from '../components/media';
+import { FieldList, groupsFor } from '../components/fields';
+import { useContentTypes } from '../contentTypes';
 import {
   ListTable, Modal, Notice, PageHeader, Pagination, SearchBox, confirmDelete,
 } from '../components/ui';
 
 const KINDS = {
-  product_cat: { title: 'Product categories', singular: 'category', path: wc('products/categories'), hierarchical: true, image: true, display: true, countLink: (t) => `/products?category=${t.id}` },
-  product_tag: { title: 'Product tags', singular: 'tag', path: wc('products/tags') },
-  shipping_class: { title: 'Shipping classes', singular: 'shipping class', path: wc('products/shipping_classes') },
-  category: { title: 'Categories', singular: 'category', path: wp('categories'), hierarchical: true, wp: true },
-  post_tag: { title: 'Tags', singular: 'tag', path: wp('tags'), wp: true },
+  product_cat: { taxonomy: 'product_cat', title: 'Product categories', singular: 'category', path: wc('products/categories'), hierarchical: true, image: true, display: true, countLink: (t) => `/products?category=${t.id}` },
+  product_tag: { taxonomy: 'product_tag', title: 'Product tags', singular: 'tag', path: wc('products/tags') },
+  shipping_class: { taxonomy: 'product_shipping_class', title: 'Shipping classes', singular: 'shipping class', path: wc('products/shipping_classes') },
+  category: { taxonomy: 'category', title: 'Categories', singular: 'category', path: wp('categories'), hierarchical: true, wp: true },
+  post_tag: { taxonomy: 'post_tag', title: 'Tags', singular: 'tag', path: wp('tags'), wp: true },
 };
 
 const blank = { name: '', slug: '', description: '', parent: 0, display: 'default', image: null, menu_order: 0 };
 
-function TermForm({ cfg, value, onChange, parents }) {
+function TermForm({ cfg, value, onChange, parents, groups, registry }) {
   const set = (patch) => onChange({ ...value, ...patch });
   return (
     <>
@@ -38,13 +40,16 @@ function TermForm({ cfg, value, onChange, parents }) {
         </div>
       )}
       {cfg.image && <div className="field"><label>Thumbnail</label><ImageField value={value.image} onChange={(image) => set({ image })} label="Upload/Add image" /></div>}
+      {groups.length > 0 && groups.map((g) => <div key={g.key} className="mt"><h3>{g.title}</h3><FieldList fields={g.fields || []} values={value.acf || {}} onChange={(acf) => set({ acf })} registry={registry} /></div>)}
       {cfg.display && <div className="field"><label>Menu order</label><input type="number" value={value.menu_order} onChange={(e) => set({ menu_order: Number(e.target.value) })} /></div>}
     </>
   );
 }
 
-export default function TermsPage({ kind }) {
-  const cfg = KINDS[kind];
+export default function TermsPage({ kind, cfg: custom }) {
+  const cfg = custom || KINDS[kind];
+  const { registry } = useContentTypes();
+  const groups = groupsFor(registry, { taxonomy: cfg.taxonomy });
   const [q, setQ] = useQueryState({ page: '1', search: '' });
   const [notice, showNotice, closeNotice] = useNotice();
   const [form, setForm] = useState(blank);
@@ -52,12 +57,13 @@ export default function TermsPage({ kind }) {
   const [parents, setParents] = useState([]);
   const { items, total, totalPages, loading, error, reload } = useCollection(cfg.path, { page: q.page, per_page: 20, search: q.search, orderby: 'name', order: 'asc', hide_empty: false });
   const loadParents = () => { if (cfg.hierarchical) fetchAll(cfg.path).then(setParents).catch(() => {}); };
-  useEffect(() => { setForm(blank); setEditing(null); loadParents(); }, [kind]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setForm(blank); setEditing(null); loadParents(); }, [kind, cfg.path]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const body = (v) => {
     const b = { name: v.name, description: v.description };
     if (v.slug) b.slug = v.slug;
     if (cfg.hierarchical) b.parent = v.parent || 0;
+    if (groups.length) b.acf = v.acf || {};
     if (cfg.display) { b.display = v.display; b.menu_order = v.menu_order; b.image = v.image && v.image.id ? { id: v.image.id } : null; }
     return b;
   };
@@ -100,7 +106,7 @@ export default function TermsPage({ kind }) {
       <div className="edit-layout" style={{ gridTemplateColumns: '320px minmax(0, 1fr)' }}>
         <form onSubmit={create}>
           <h2>Add new {cfg.singular}</h2>
-          <TermForm cfg={cfg} value={form} onChange={setForm} parents={parents} />
+          <TermForm cfg={cfg} value={form} onChange={setForm} parents={parents} groups={groups} registry={registry} />
           <button type="submit" className="button button-primary">Add new {cfg.singular}</button>
         </form>
         <div>
@@ -113,7 +119,7 @@ export default function TermsPage({ kind }) {
       {editing && (
         <Modal title={`Edit ${cfg.singular}`} onClose={() => setEditing(null)} width={560}
           footer={<><button type="button" className="button" onClick={() => setEditing(null)}>Cancel</button><button type="button" className="button button-primary" onClick={update}>Update</button></>}>
-          <TermForm cfg={cfg} value={editing} onChange={setEditing} parents={parents} />
+          <TermForm cfg={cfg} value={editing} onChange={setEditing} parents={parents} groups={groups} registry={registry} />
         </Modal>
       )}
     </>

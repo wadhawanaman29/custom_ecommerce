@@ -199,6 +199,7 @@ model ProductCategory {
   imageId     Int?
   image       Media?   @relation(fields: [imageId], references: [id], onDelete: SetNull)
   menuOrder   Int      @default(0)
+  meta        Json?    // term meta / ACF fields ("acf:<name>")
   products    Product[] @relation("ProductToCategory")
 }
 

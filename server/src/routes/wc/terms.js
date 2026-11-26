@@ -138,11 +138,20 @@ const categories = termRouter({
     image: t.image ? imageOut(t.image, s) : null,
     menu_order: t.menuOrder,
     count: t._count ? t._count.products : 0,
+    // ACF term fields (e.g. menu_title), like the "ACF to REST API" plugin
+    acf: Array.isArray(t.meta) && t.meta.some((m) => m.key && m.key.startsWith('acf:'))
+      ? Object.fromEntries(t.meta.filter((m) => m.key && m.key.startsWith('acf:')).map((m) => [m.key.slice(4), m.value])) : {},
     _links: { self: [{ href: `${API}/products/categories/${t.id}` }], collection: [{ href: `${API}/products/categories` }] },
   }),
-  writable: async (body) => {
+  writable: async (body, existing) => {
     const d = {};
     if (has(body, 'parent')) d.parentId = parseInt(body.parent, 10) || null;
+    if (has(body, 'acf') && body.acf && typeof body.acf === 'object') {
+      const list = (Array.isArray(existing?.meta) ? existing.meta : []).filter((m) => !(m.key && m.key.startsWith('acf:') && has(body.acf, m.key.slice(4))));
+      let id = list.reduce((n, m) => Math.max(n, m.id || 0), 0);
+      for (const [key, value] of Object.entries(body.acf)) if (value !== null) list.push({ id: ++id, key: `acf:${key}`, value });
+      d.meta = list;
+    }
     if (has(body, 'display')) d.display = String(body.display);
     if (has(body, 'menu_order')) d.menuOrder = parseInt(body.menu_order, 10) || 0;
     if (has(body, 'image')) {

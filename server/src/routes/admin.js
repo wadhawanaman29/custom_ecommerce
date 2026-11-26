@@ -162,6 +162,65 @@ router.get('/import/jobs/:id', admin, (req, res, next) => {
   res.json(jobOut(j, true, parseInt(req.query.since, 10) || 0));
 });
 
+// ───────── Content types & custom fields (CPT UI + ACF equivalent) ─────────
+const ct = require('../lib/content-types');
+router.get('/content-types', can('edit_posts'), ah(async (req, res) => res.json(await ct.getRegistry())));
+router.put('/content-types', admin, ah(async (req, res) => {
+  try {
+    res.json(await ct.saveRegistry(req.body || {}));
+  } catch (e) {
+    if (e.validation) throw badRequest('invalid_content_types', e.message, { errors: e.validation });
+    throw e;
+  }
+}));
+router.post('/content-types/reset', admin, ah(async (req, res) => res.json(await ct.saveRegistry(ct.DEFAULTS))));
+
+// Paste an ACF export (Custom Fields → Tools → Export Field Groups → JSON): merges groups by key
+router.post('/content-types/import-acf', admin, ah(async (req, res) => {
+  let groups = req.body && req.body.json !== undefined ? req.body.json : req.body;
+  if (typeof groups === 'string') {
+    try { groups = JSON.parse(groups); } catch { throw badRequest('invalid_json', 'That is not valid JSON.'); }
+  }
+  if (!Array.isArray(groups)) groups = [groups];
+  // ACF 6.1+ exports can also contain post types / taxonomies
+  const fieldGroups = groups.filter((g) => g && Array.isArray(g.fields));
+  const postTypes = groups.filter((g) => g && g.post_type && !g.fields);
+  const taxonomies = groups.filter((g) => g && g.taxonomy && !g.fields && g.object_type);
+  if (!fieldGroups.length && !postTypes.length && !taxonomies.length) throw badRequest('nothing_to_import', 'No ACF field groups, post types or taxonomies found in that JSON.');
+  const reg = await ct.getRegistry();
+  const byKey = new Map(reg.field_groups.map((g) => [g.key, g]));
+  for (const g of fieldGroups) byKey.set(g.key, g);
+  const types = [...reg.types];
+  for (const t of postTypes) {
+    const def = { name: t.post_type, label: (t.labels && t.labels.name) || t.title, singular_label: (t.labels && t.labels.singular_name) || t.title, hierarchical: !!t.hierarchical, supports: t.supports || ['title', 'editor'], taxonomies: t.taxonomies || [], rest_base: t.rest_base || t.post_type, menu_icon: '📄' };
+    const i = types.findIndex((x) => x.name === def.name);
+    if (i >= 0) types[i] = { ...types[i], ...def }; else types.push(def);
+  }
+  const taxes = [...reg.taxonomies];
+  for (const t of taxonomies) {
+    const def = { name: t.taxonomy, label: (t.labels && t.labels.name) || t.title, singular_label: (t.labels && t.labels.singular_name) || t.title, hierarchical: !!t.hierarchical, object_types: t.object_type || [], rest_base: t.rest_base || t.taxonomy };
+    const i = taxes.findIndex((x) => x.name === def.name);
+    if (i >= 0) taxes[i] = { ...taxes[i], ...def }; else taxes.push(def);
+  }
+  const saved = await ct.saveRegistry({ field_groups: [...byKey.values()], types, taxonomies: taxes });
+  res.json({ imported: { field_groups: fieldGroups.length, post_types: postTypes.length, taxonomies: taxonomies.length }, registry: saved });
+}));
+
+// Paste a CPT UI export (CPT UI → Tools → Export Post Types / Taxonomies)
+router.post('/content-types/import-cptui', admin, ah(async (req, res) => {
+  let data = req.body && req.body.json !== undefined ? req.body.json : req.body;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { throw badRequest('invalid_json', 'That is not valid JSON.'); }
+  }
+  const { fromCptUi } = require('../services/import/acf');
+  const out = fromCptUi(data || {});
+  if (!out.types.length && !out.taxonomies.length) throw badRequest('nothing_to_import', 'No CPT UI post types or taxonomies found in that JSON.');
+  const reg = await ct.getRegistry();
+  const merge = (list, add) => { const m = new Map(list.map((x) => [x.name, x])); for (const a of add) m.set(a.name, { ...(m.get(a.name) || {}), ...a }); return [...m.values()]; };
+  const saved = await ct.saveRegistry({ types: merge(reg.types, out.types), taxonomies: merge(reg.taxonomies, out.taxonomies) });
+  res.json({ imported: { post_types: out.types.length, taxonomies: out.taxonomies.length }, registry: saved });
+}));
+
 // ───────── REST API keys (WooCommerce → Settings → Advanced → REST API) ─────────
 const keyOut = (k) => ({
   id: k.id, description: k.description, permissions: k.permissions, truncated_key: k.truncatedKey, last_access: k.lastAccess,

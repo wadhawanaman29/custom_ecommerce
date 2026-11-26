@@ -100,6 +100,7 @@ wp.use('/menus', site.menus);
 wp.use('/menu-items', site.menuItems);
 wp.use('/settings', site.settings);
 wp.use('/search', site.search);
+wp.use('/:base', wpPosts.dynamicContentRouter()); // custom post types & taxonomies (CPT UI equivalent)
 app.use('/wp-json/wp/v2', wp);
 
 app.use('/wp-json/jwt-auth/v1', wpUsers.jwtAuth);

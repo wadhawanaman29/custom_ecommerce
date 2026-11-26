@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../auth';
+import { useContentTypes } from '../contentTypes';
 
 const MENU = [
   { to: '/', label: 'Dashboard', icon: '⌂', end: true },
@@ -28,7 +29,7 @@ const MENU = [
   ] },
   { to: '/menus', label: 'Menus', icon: '☰', perm: 'settings' },
   { label: 'Users', icon: '👤', base: '/users', perm: 'users', children: [{ to: '/users', label: 'All Users', end: true }, { to: '/users/new', label: 'Add New' }] },
-  { label: 'Tools', icon: '⚒', base: '/tools', perm: 'settings', children: [{ to: '/tools/import', label: 'Import from WordPress' }, { to: '/tools/api-keys', label: 'REST API keys' }] },
+  { label: 'Tools', icon: '⚒', base: '/tools', perm: 'settings', children: [{ to: '/tools/import', label: 'Import from WordPress' }, { to: '/tools/content-types', label: 'Content Types' }, { to: '/tools/api-keys', label: 'REST API keys' }] },
   { label: 'Settings', icon: '⚙', base: '/settings', perm: 'settings', children: [{ to: '/settings', label: 'General', end: true }, { to: '/settings/reading', label: 'Reading' }] },
 ];
 
@@ -37,12 +38,23 @@ const isOpen = (item, path) => item.base && (path.startsWith(item.base) || item.
 export default function Layout() {
   const { user, logout, can } = useAuth();
   const { pathname } = useLocation();
+  const { registry } = useContentTypes();
+  // Custom post types appear after Comments, like CPT UI menus in WordPress
+  const custom = (registry ? registry.types : []).map((t) => ({
+    label: t.label, icon: t.menu_icon && t.menu_icon.length <= 2 ? t.menu_icon : '📌', base: `/content/${t.name}`, perm: 'content',
+    children: [
+      { to: `/content/${t.name}`, label: `All ${t.label}`, end: true }, { to: `/content/${t.name}/new`, label: `Add new ${t.singular_label || t.label}` },
+      ...registry.taxonomies.filter((x) => (t.taxonomies || []).includes(x.name) || (x.object_types || []).includes(t.name)).map((x) => ({ to: `/content/${t.name}/tax/${x.name}`, label: x.label })),
+    ],
+  }));
+  const commentsAt = MENU.findIndex((m) => m.to === '/comments') + 1;
+  const menu = [...MENU.slice(0, commentsAt), ...custom, ...MENU.slice(commentsAt)];
   return (
     <div className="wp-shell">
       <nav className="wp-sidebar" aria-label="Main menu">
         <div className="brand">Store Admin</div>
         <ul className="wp-menu">
-          {MENU.filter((m) => !m.perm || can(m.perm)).map((m) => {
+          {menu.filter((m) => !m.perm || can(m.perm)).map((m) => {
             if (!m.children) {
               return (
                 <li key={m.to} className={(m.end ? pathname === m.to : pathname.startsWith(m.to)) ? 'active' : ''}>
