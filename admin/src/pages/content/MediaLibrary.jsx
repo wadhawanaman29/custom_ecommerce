@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api, wp } from '../../api';
 import { useCollection, useNotice, useQueryState } from '../../hooks';
 import { date, decodeHtml } from '../../format';
-import { UploadButton, thumbOf } from '../../components/media';
+import { UploadButton, thumbOf, uploadFiles } from '../../components/media';
 import {
   Modal, Notice, PageHeader, Pagination, Spinner, confirmDelete,
 } from '../../components/ui';
@@ -26,7 +26,6 @@ export default function MediaLibrary() {
     const files = [...e.dataTransfer.files];
     if (!files.length) return;
     try {
-      const { uploadFiles } = await import('../../components/media');
       await uploadFiles(files);
       showNotice('success', `${files.length} file(s) uploaded.`); reload();
     } catch (err) { showNotice('error', err.message); }
