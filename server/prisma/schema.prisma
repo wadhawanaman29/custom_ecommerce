@@ -1,0 +1,574 @@
+// Clean, indexed schema replacing wp_posts / wp_postmeta / wp_terms.
+// IDs from the original WordPress install are preserved by the migration script,
+// so existing frontend URLs and references keep working.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Settings (wp_options) ─────────────────────────────
+
+model Option {
+  name     String  @id @db.VarChar(191)
+  value    Json
+  autoload Boolean @default(true)
+}
+
+// ───────────────────────────── Users ─────────────────────────────
+
+model User {
+  id               Int       @id @default(autoincrement())
+  login            String    @unique @db.VarChar(60)
+  email            String    @unique @db.VarChar(191)
+  passwordHash     String    @db.VarChar(255)
+  displayName      String    @default("") @db.VarChar(250)
+  firstName        String    @default("") @db.VarChar(191)
+  lastName         String    @default("") @db.VarChar(191)
+  nicename         String    @default("") @db.VarChar(191)
+  url              String    @default("") @db.VarChar(191)
+  description      String    @default("") @db.Text
+  // administrator | shop_manager | editor | author | contributor | customer | subscriber
+  role             String    @default("customer") @db.VarChar(40)
+  billing          Json?
+  shipping         Json?
+  isPayingCustomer Boolean   @default(false)
+  meta             Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  orders   Order[]
+  apiKeys  ApiKey[]
+  posts    Post[]
+  media    Media[]
+
+  @@index([role])
+}
+
+model ApiKey {
+  id             Int       @id @default(autoincrement())
+  userId         Int
+  description    String    @default("") @db.VarChar(200)
+  permissions    String    @default("read") @db.VarChar(10) // read | write | read_write
+  consumerKey    String    @unique @db.Char(64) // hmac-sha256(ck, 'wc-api'), same as WooCommerce
+  consumerSecret String    @db.Char(43)
+  truncatedKey   String    @db.Char(7)
+  lastAccess     DateTime?
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ───────────────────────────── Media ─────────────────────────────
+
+model Media {
+  id        Int      @id @default(autoincrement())
+  title     String   @default("") @db.VarChar(255)
+  slug      String   @default("") @db.VarChar(200)
+  fileName  String   @db.VarChar(255)
+  // Relative path under uploads/ (e.g. 2024/05/shirt.jpg), or absolute URL for remote files
+  path      String   @db.VarChar(500)
+  mimeType  String   @db.VarChar(100)
+  fileSize  Int      @default(0)
+  width     Int?
+  height    Int?
+  altText   String   @default("") @db.VarChar(255)
+  caption   String   @default("") @db.Text
+  description String @default("") @db.Text
+  sizes     Json?
+  authorId  Int?
+  author    User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  productImages ProductImage[]
+  categoryImages ProductCategory[]
+
+  @@index([mimeType])
+}
+
+// ───────────────────────────── Catalog ─────────────────────────────
+
+model Product {
+  id                Int       @id @default(autoincrement())
+  // simple | variable | grouped | external | variation
+  type              String    @default("simple") @db.VarChar(20)
+  parentId          Int?      // set for variations
+  parent            Product?  @relation("Variations", fields: [parentId], references: [id], onDelete: Cascade)
+  variations        Product[] @relation("Variations")
+
+  name              String    @default("") @db.VarChar(255)
+  slug              String    @default("") @db.VarChar(200)
+  // publish | draft | pending | private | trash
+  status            String    @default("publish") @db.VarChar(20)
+  featured          Boolean   @default(false)
+  catalogVisibility String    @default("visible") @db.VarChar(20)
+  description       String    @default("") @db.LongText
+  shortDescription  String    @default("") @db.Text
+  sku               String?   @db.VarChar(100)
+
+  price             Decimal?  @db.Decimal(19, 4)
+  regularPrice      Decimal?  @db.Decimal(19, 4)
+  salePrice         Decimal?  @db.Decimal(19, 4)
+  dateOnSaleFrom    DateTime?
+  dateOnSaleTo      DateTime?
+
+  virtual           Boolean   @default(false)
+  downloadable      Boolean   @default(false)
+  downloads         Json?
+  downloadLimit     Int       @default(-1)
+  downloadExpiry    Int       @default(-1)
+  externalUrl       String    @default("") @db.VarChar(500)
+  buttonText        String    @default("") @db.VarChar(100)
+
+  taxStatus         String    @default("taxable") @db.VarChar(20)
+  taxClass          String    @default("") @db.VarChar(100)
+
+  manageStock       Boolean   @default(false)
+  stockQuantity     Int?
+  stockStatus       String    @default("instock") @db.VarChar(20)
+  backorders        String    @default("no") @db.VarChar(10)
+  lowStockAmount    Int?
+  soldIndividually  Boolean   @default(false)
+
+  weight            String    @default("") @db.VarChar(20)
+  length            String    @default("") @db.VarChar(20)
+  width             String    @default("") @db.VarChar(20)
+  height            String    @default("") @db.VarChar(20)
+  shippingClassId   Int?
+  shippingClass     ShippingClass? @relation(fields: [shippingClassId], references: [id], onDelete: SetNull)
+
+  reviewsAllowed    Boolean   @default(true)
+  averageRating     Decimal   @default(0) @db.Decimal(3, 2)
+  ratingCount       Int       @default(0)
+  totalSales        Int       @default(0)
+  purchaseNote      String    @default("") @db.Text
+  menuOrder         Int       @default(0)
+
+  upsellIds         Json?
+  crossSellIds      Json?
+  groupedProducts   Json?
+  // For variations: [{ id, name, option }]; for parents: default_attributes
+  variationAttributes Json?
+  defaultAttributes   Json?
+  meta              Json?     // free-form meta_data [{ key, value }]
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  categories        ProductCategory[] @relation("ProductToCategory")
+  tags              ProductTag[]      @relation("ProductToTag")
+  images            ProductImage[]
+  attributes        ProductAttribute[]
+  reviews           ProductReview[]
+
+  @@unique([sku])
+  @@index([slug])
+  @@index([type, status])
+  @@index([parentId])
+  @@index([price])
+  @@index([featured])
+  @@index([stockStatus])
+  @@index([totalSales])
+  @@index([createdAt])
+}
+
+model ProductImage {
+  id        Int     @id @default(autoincrement())
+  productId Int
+  mediaId   Int
+  position  Int     @default(0)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  media     Media   @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, mediaId])
+  @@index([productId, position])
+}
+
+model ProductCategory {
+  id          Int      @id @default(autoincrement())
+  name        String   @db.VarChar(200)
+  slug        String   @unique @db.VarChar(200)
+  description String   @default("") @db.Text
+  parentId    Int?
+  parent      ProductCategory?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children    ProductCategory[] @relation("CategoryTree")
+  display     String   @default("default") @db.VarChar(20)
+  imageId     Int?
+  image       Media?   @relation(fields: [imageId], references: [id], onDelete: SetNull)
+  menuOrder   Int      @default(0)
+  products    Product[] @relation("ProductToCategory")
+}
+
+model ProductTag {
+  id          Int      @id @default(autoincrement())
+  name        String   @db.VarChar(200)
+  slug        String   @unique @db.VarChar(200)
+  description String   @default("") @db.Text
+  products    Product[] @relation("ProductToTag")
+}
+
+// Global attributes (Products → Attributes), e.g. pa_color
+model Attribute {
+  id          Int      @id @default(autoincrement())
+  name        String   @db.VarChar(200)
+  slug        String   @unique @db.VarChar(200) // stored without "pa_" prefix
+  type        String   @default("select") @db.VarChar(20)
+  orderBy     String   @default("menu_order") @db.VarChar(20)
+  hasArchives Boolean  @default(false)
+  terms       AttributeTerm[]
+}
+
+model AttributeTerm {
+  id          Int       @id @default(autoincrement())
+  attributeId Int
+  attribute   Attribute @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  name        String    @db.VarChar(200)
+  slug        String    @db.VarChar(200)
+  description String    @default("") @db.Text
+  menuOrder   Int       @default(0)
+
+  @@unique([attributeId, slug])
+}
+
+// Attributes attached to a product (global or custom/local)
+model ProductAttribute {
+  id          Int      @id @default(autoincrement())
+  productId   Int
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attributeId Int      @default(0) // 0 = custom attribute
+  name        String   @db.VarChar(200)
+  position    Int      @default(0)
+  visible     Boolean  @default(true)
+  variation   Boolean  @default(false)
+  options     Json     // ["Red", "Blue"]
+
+  @@index([productId])
+}
+
+model ProductReview {
+  id            Int      @id @default(autoincrement())
+  productId     Int
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  status        String   @default("approved") @db.VarChar(20) // approved | hold | spam | trash
+  reviewer      String   @db.VarChar(200)
+  reviewerEmail String   @db.VarChar(191)
+  review        String   @db.Text
+  rating        Int      @default(0)
+  verified      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  @@index([productId, status])
+}
+
+model ShippingClass {
+  id          Int       @id @default(autoincrement())
+  name        String    @db.VarChar(200)
+  slug        String    @unique @db.VarChar(200)
+  description String    @default("") @db.Text
+  products    Product[]
+}
+
+// ───────────────────────────── Orders ─────────────────────────────
+
+model Order {
+  id                 Int       @id @default(autoincrement())
+  parentId           Int       @default(0)
+  number             String    @default("") @db.VarChar(50)
+  orderKey           String    @db.VarChar(64)
+  createdVia         String    @default("rest-api") @db.VarChar(50)
+  version            String    @default("") @db.VarChar(20)
+  // pending | processing | on-hold | completed | cancelled | refunded | failed | checkout-draft
+  status             String    @default("pending") @db.VarChar(30)
+  currency           String    @default("USD") @db.VarChar(10)
+  pricesIncludeTax   Boolean   @default(false)
+
+  discountTotal      Decimal   @default(0) @db.Decimal(19, 4)
+  discountTax        Decimal   @default(0) @db.Decimal(19, 4)
+  shippingTotal      Decimal   @default(0) @db.Decimal(19, 4)
+  shippingTax        Decimal   @default(0) @db.Decimal(19, 4)
+  cartTax            Decimal   @default(0) @db.Decimal(19, 4)
+  total              Decimal   @default(0) @db.Decimal(19, 4)
+  totalTax           Decimal   @default(0) @db.Decimal(19, 4)
+
+  customerId         Int?
+  customer           User?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerIpAddress  String    @default("") @db.VarChar(100)
+  customerUserAgent  String    @default("") @db.Text
+  customerNote       String    @default("") @db.Text
+  billing            Json
+  shipping           Json
+
+  paymentMethod      String    @default("") @db.VarChar(100)
+  paymentMethodTitle String    @default("") @db.VarChar(200)
+  transactionId      String    @default("") @db.VarChar(200)
+  datePaid           DateTime?
+  dateCompleted      DateTime?
+  cartHash           String    @default("") @db.VarChar(64)
+  meta               Json?
+
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  items              OrderItem[]
+  notes              OrderNote[]
+  refunds            OrderRefund[]
+
+  @@index([status])
+  @@index([customerId])
+  @@index([createdAt])
+  @@index([orderKey])
+}
+
+// One table for all order item types, like wp_woocommerce_order_items
+model OrderItem {
+  id          Int      @id @default(autoincrement())
+  orderId     Int
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  // line_item | shipping | fee | coupon | tax
+  type        String   @db.VarChar(20)
+  name        String   @default("") @db.VarChar(255)
+
+  // line_item
+  productId   Int?
+  variationId Int?
+  quantity    Int      @default(0)
+  sku         String   @default("") @db.VarChar(100)
+  price       Decimal  @default(0) @db.Decimal(19, 4)
+  taxClass    String   @default("") @db.VarChar(100)
+  subtotal    Decimal  @default(0) @db.Decimal(19, 4)
+  subtotalTax Decimal  @default(0) @db.Decimal(19, 4)
+  total       Decimal  @default(0) @db.Decimal(19, 4)
+  totalTax    Decimal  @default(0) @db.Decimal(19, 4)
+  taxes       Json?    // [{ id, total, subtotal }]
+
+  // shipping
+  methodId    String   @default("") @db.VarChar(100)
+  instanceId  String   @default("") @db.VarChar(20)
+  // coupon
+  code        String   @default("") @db.VarChar(100)
+  discount    Decimal  @default(0) @db.Decimal(19, 4)
+  discountTax Decimal  @default(0) @db.Decimal(19, 4)
+  // tax
+  rateId      Int?
+  rateCode    String   @default("") @db.VarChar(100)
+  ratePercent Decimal  @default(0) @db.Decimal(8, 4)
+  compound    Boolean  @default(false)
+  shippingTaxTotal Decimal @default(0) @db.Decimal(19, 4)
+
+  meta        Json?    // meta_data [{ key, value, display_key, display_value }]
+
+  @@index([orderId, type])
+  @@index([productId])
+}
+
+model OrderNote {
+  id           Int      @id @default(autoincrement())
+  orderId      Int
+  order        Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  note         String   @db.Text
+  author       String   @default("system") @db.VarChar(200)
+  customerNote Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([orderId])
+}
+
+model OrderRefund {
+  id         Int      @id @default(autoincrement())
+  orderId    Int
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amount     Decimal  @db.Decimal(19, 4)
+  reason     String   @default("") @db.Text
+  refundedBy Int      @default(0)
+  refundedPayment Boolean @default(false)
+  lineItems  Json?
+  createdAt  DateTime @default(now())
+
+  @@index([orderId])
+}
+
+// ───────────────────────────── Coupons ─────────────────────────────
+
+model Coupon {
+  id                        Int       @id @default(autoincrement())
+  code                      String    @unique @db.VarChar(100) // stored lowercase, like WC
+  amount                    Decimal   @default(0) @db.Decimal(19, 4)
+  status                    String    @default("publish") @db.VarChar(20)
+  discountType              String    @default("fixed_cart") @db.VarChar(20) // percent | fixed_cart | fixed_product
+  description               String    @default("") @db.Text
+  dateExpires               DateTime?
+  usageCount                Int       @default(0)
+  individualUse             Boolean   @default(false)
+  productIds                Json?
+  excludedProductIds        Json?
+  usageLimit                Int?
+  usageLimitPerUser         Int?
+  limitUsageToXItems        Int?
+  freeShipping              Boolean   @default(false)
+  productCategories         Json?
+  excludedProductCategories Json?
+  excludeSaleItems          Boolean   @default(false)
+  minimumAmount             Decimal?  @db.Decimal(19, 4)
+  maximumAmount             Decimal?  @db.Decimal(19, 4)
+  emailRestrictions         Json?
+  usedBy                    Json?     // [userId or email, ...]
+  meta                      Json?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+}
+
+// ───────────────────────────── Tax ─────────────────────────────
+
+model TaxClass {
+  slug String @id @db.VarChar(100) // "standard" is implicit
+  name String @db.VarChar(200)
+}
+
+model TaxRate {
+  id        Int     @id @default(autoincrement())
+  country   String  @default("") @db.VarChar(2)
+  state     String  @default("") @db.VarChar(200)
+  postcodes Json?   // ["90210", "902*"]
+  cities    Json?
+  rate      Decimal @db.Decimal(8, 4)
+  name      String  @default("") @db.VarChar(200)
+  priority  Int     @default(1)
+  compound  Boolean @default(false)
+  shipping  Boolean @default(true)
+  order     Int     @default(0)
+  class     String  @default("standard") @db.VarChar(100)
+
+  @@index([country, class])
+}
+
+// ───────────────────────────── Shipping ─────────────────────────────
+
+model ShippingZone {
+  id        Int                    @id @default(autoincrement())
+  name      String                 @db.VarChar(200)
+  order     Int                    @default(0)
+  locations ShippingZoneLocation[]
+  methods   ShippingZoneMethod[]
+}
+
+model ShippingZoneLocation {
+  id     Int          @id @default(autoincrement())
+  zoneId Int
+  zone   ShippingZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  code   String       @db.VarChar(200) // "US", "US:CA", "902*", "NA"
+  type   String       @db.VarChar(20)  // country | state | postcode | continent
+}
+
+model ShippingZoneMethod {
+  instanceId Int          @id @default(autoincrement())
+  zoneId     Int?         // null = zone 0 "Locations not covered by your other zones"
+  zone       ShippingZone? @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  methodId   String       @db.VarChar(50) // flat_rate | free_shipping | local_pickup
+  order      Int          @default(0)
+  enabled    Boolean      @default(true)
+  settings   Json         // { title, cost, tax_status, min_amount, requires, class_costs... }
+
+  @@index([zoneId])
+}
+
+// ───────────────────────────── Payment gateways ─────────────────────────────
+
+model PaymentGateway {
+  id          String  @id @db.VarChar(100) // bacs | cheque | cod | razorpay | stripe ...
+  title       String  @db.VarChar(200)
+  description String  @default("") @db.Text
+  order       Int     @default(0)
+  enabled     Boolean @default(false)
+  methodTitle String  @default("") @db.VarChar(200)
+  methodDescription String @default("") @db.Text
+  settings    Json?
+}
+
+// ───────────────────────────── CMS (posts, pages, terms, menus) ─────────────────────────────
+
+model Post {
+  id            Int       @id @default(autoincrement())
+  type          String    @default("post") @db.VarChar(20) // post | page
+  title         String    @default("") @db.Text
+  slug          String    @default("") @db.VarChar(200)
+  content       String    @default("") @db.LongText
+  excerpt       String    @default("") @db.Text
+  status        String    @default("publish") @db.VarChar(20) // publish | future | draft | pending | private | trash
+  authorId      Int?
+  author        User?     @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  parentId      Int       @default(0)
+  menuOrder     Int       @default(0)
+  featuredMediaId Int     @default(0)
+  template      String    @default("") @db.VarChar(200)
+  commentStatus String    @default("open") @db.VarChar(20)
+  pingStatus    String    @default("open") @db.VarChar(20)
+  sticky        Boolean   @default(false)
+  format        String    @default("standard") @db.VarChar(20)
+  password      String    @default("") @db.VarChar(255)
+  meta          Json?     // custom fields / ACF values
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  terms         Term[]    @relation("PostToTerm")
+
+  @@index([type, status, createdAt])
+  @@index([slug])
+  @@index([parentId])
+}
+
+model Term {
+  id          Int      @id @default(autoincrement())
+  taxonomy    String   @db.VarChar(32) // category | post_tag
+  name        String   @db.VarChar(200)
+  slug        String   @db.VarChar(200)
+  description String   @default("") @db.Text
+  parentId    Int      @default(0)
+  meta        Json?
+  posts       Post[]   @relation("PostToTerm")
+
+  @@unique([taxonomy, slug])
+}
+
+model Comment {
+  id          Int      @id @default(autoincrement())
+  postId      Int
+  parentId    Int      @default(0)
+  authorId    Int      @default(0)
+  authorName  String   @default("") @db.VarChar(200)
+  authorEmail String   @default("") @db.VarChar(191)
+  authorUrl   String   @default("") @db.VarChar(200)
+  content     String   @db.Text
+  status      String   @default("hold") @db.VarChar(20) // approved | hold | spam | trash
+  createdAt   DateTime @default(now())
+
+  @@index([postId, status])
+}
+
+model Menu {
+  id        Int        @id @default(autoincrement())
+  name      String     @db.VarChar(200)
+  slug      String     @unique @db.VarChar(200)
+  locations Json?      // ["primary", "footer"]
+  items     MenuItem[]
+}
+
+model MenuItem {
+  id        Int      @id @default(autoincrement())
+  menuId    Int
+  menu      Menu     @relation(fields: [menuId], references: [id], onDelete: Cascade)
+  parentId  Int      @default(0)
+  title     String   @db.VarChar(255)
+  url       String   @default("") @db.VarChar(500)
+  // custom | post_type | taxonomy
+  type      String   @default("custom") @db.VarChar(20)
+  object    String   @default("custom") @db.VarChar(50) // page | post | product_cat | ...
+  objectId  Int      @default(0)
+  target    String   @default("") @db.VarChar(20)
+  classes   String   @default("") @db.VarChar(255)
+  menuOrder Int      @default(0)
+
+  @@index([menuId, menuOrder])
+}

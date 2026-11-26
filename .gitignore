@@ -1,0 +1,21 @@
+# Kept out of this repo: client frontend (its own git repo) and the legacy WordPress plugin
+/New folder/
+/ebrand-api-new.php/
+
+# Dependencies & builds
+node_modules/
+dist/
+
+# Secrets & local data
+.env
+.env.*
+!.env.example
+server/uploads/*
+!server/uploads/.gitkeep
+
+# OS / editor / logs
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

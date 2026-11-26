@@ -1,0 +1,37 @@
+{
+  "name": "custom-ecommerce-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node.js replacement for WordPress + WooCommerce, API-compatible with wc/v3 and wp/v2",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=16.13"
+  },
+  "scripts": {
+    "dev": "nodemon src/index.js",
+    "start": "node src/index.js",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:generate": "prisma generate",
+    "seed": "node scripts/seed.js",
+    "migrate:wp": "node scripts/migrate-woocommerce.js"
+  },
+  "dependencies": {
+    "@prisma/client": "5.22.0",
+    "bcryptjs": "2.4.3",
+    "compression": "1.7.5",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.21.1",
+    "helmet": "7.1.0",
+    "jsonwebtoken": "9.0.2",
+    "morgan": "1.10.0",
+    "multer": "2.0.2",
+    "mysql2": "3.11.4",
+    "php-serialize": "4.1.1"
+  },
+  "devDependencies": {
+    "nodemon": "3.1.7",
+    "prisma": "5.22.0"
+  }
+}
