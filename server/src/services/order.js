@@ -338,7 +338,11 @@ async function reduceStock(tx, order, parents) {
     const newQty = (target.stockQuantity || 0) - it.quantity;
     await tx.product.update({
       where: { id: target.id },
-      data: { stockQuantity: { decrement: it.quantity }, stockStatus: newQty > 0 ? 'instock' : target.backorders !== 'no' ? 'onbackorder' : 'outofstock' },
+      data: {
+        stockQuantity: { decrement: it.quantity },
+        stockStatus: newQty > 0 ? 'instock' : target.backorders !== 'no' ? 'onbackorder' : 'outofstock',
+        ...(newQty <= 0 && target.backorders === 'no' && target.stockStatus !== 'outofstock' ? { outOfStockAt: new Date() } : {}),
+      },
     });
     changes.push(`${it.name}${it.sku ? ` (${it.sku})` : ''} ${target.stockQuantity}&rarr;${newQty}`);
     if (target.parentId) parents.add(target.parentId);
@@ -356,7 +360,7 @@ async function restoreStock(tx, order, parents) {
     const newQty = (target.stockQuantity || 0) + it.quantity;
     await tx.product.update({
       where: { id: target.id },
-      data: { stockQuantity: { increment: it.quantity }, stockStatus: newQty > 0 ? 'instock' : target.backorders !== 'no' ? 'onbackorder' : 'outofstock' },
+      data: { stockQuantity: { increment: it.quantity }, stockStatus: newQty > 0 ? 'instock' : target.backorders !== 'no' ? 'onbackorder' : 'outofstock', ...(newQty > 0 ? { outOfStockAt: null } : {}) },
     });
     changes.push(`${it.name}${it.sku ? ` (${it.sku})` : ''} ${target.stockQuantity}&rarr;${newQty}`);
     if (target.parentId) parents.add(target.parentId);

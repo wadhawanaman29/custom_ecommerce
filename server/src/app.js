@@ -76,6 +76,7 @@ app.use('/wp-json', authenticate, clearOnWrite());
 const wc = express.Router();
 wc.use('/products/categories', terms.categories);
 wc.use('/products/tags', terms.tags);
+wc.use('/products/brands', terms.brands);
 wc.use('/products/shipping_classes', terms.shippingClasses);
 wc.use('/products/attributes', terms.attributes);
 wc.use('/products/reviews', terms.reviews);

@@ -321,11 +321,18 @@ async function loadAcfDefinitions() {
 async function contentMeta(m) {
   const { fields, acf } = await loadAcfDefinitions();
   if (!m || !m.size) return [];
-  if (!fields.length) return publicMeta(m);
-  const { values, managedKeys } = acf.acfValues(m, fields);
-  const base = publicMeta(m).filter((x) => !managedKeys.has(x.key.replace(/^acf:/, '')));
+  const { keepOnImport } = require('../../lib/product-extras');
+  const kept = [...m].filter(([k]) => keepOnImport(k)).map(([key, raw]) => { const v = php(raw); return { key, value: v === null ? raw : v }; });
+  let base;
+  let acfRows = [];
+  if (!fields.length) base = publicMeta(m);
+  else {
+    const { values, managedKeys } = acf.acfValues(m, fields);
+    base = publicMeta(m).filter((x) => !managedKeys.has(x.key.replace(/^acf:/, '')));
+    acfRows = Object.entries(values).map(([key, value]) => ({ key: `acf:${key}`, value }));
+  }
   let id = base.reduce((n, x) => Math.max(n, x.id || 0), 0);
-  return [...base, ...Object.entries(values).map(([key, value]) => ({ id: ++id, key: `acf:${key}`, value }))];
+  return [...base, ...acfRows.map((x) => ({ id: ++id, ...x })), ...kept.map((x) => ({ id: ++id, ...x }))];
 }
 
 async function migrateCatalogTerms() {
@@ -349,6 +356,21 @@ async function migrateCatalogTerms() {
     await prisma.productCategory.updateMany({ where: { id: c.id }, data: { parentId: c.parent } });
   }
   log(`  ${cats.length} categories`);
+
+  const brands = await termsOf('product_brand');
+  if (brands.length) {
+    const bmeta = await metaFor('termmeta', 'term_id', brands.map((b) => b.id));
+    const bMedia = await existingIds('media', brands.map((b) => parseInt((bmeta.get(b.id) || new Map()).get('thumbnail_id'), 10)).filter(Boolean));
+    const rows = [];
+    for (const b of brands) {
+      const m = bmeta.get(b.id) || new Map();
+      const img = parseInt(m.get('thumbnail_id'), 10);
+      rows.push({ id: b.id, name: b.name, slug: b.slug, description: b.description || '', imageId: bMedia.has(img) ? img : null, menuOrder: parseInt(m.get('order'), 10) || 0, meta: await contentMeta(new Map([...m].filter(([k]) => !['thumbnail_id', 'order'].includes(k)))) });
+    }
+    await insertMany('productBrand', rows);
+    for (const b of brands.filter((x) => x.parent)) await prisma.productBrand.updateMany({ where: { id: b.id }, data: { parentId: b.parent } });
+  }
+  log(`  ${brands.length} brands`);
 
   const tags = await termsOf('product_tag');
   await insertMany('productTag', tags.map((t) => ({ id: t.id, name: t.name, slug: t.slug, description: t.description || '' })));
@@ -382,10 +404,12 @@ async function migrateProducts() {
   const cats = await termsOf('product_cat');
   const tags = await termsOf('product_tag');
   const classes = await termsOf('product_shipping_class');
+  const brandTerms = await termsOf('product_brand');
+  const brandTtids = new Set(brandTerms.map((b) => b.ttid));
   const attrs = await q(`SELECT attribute_id, attribute_name, attribute_label FROM ${T('woocommerce_attribute_taxonomies')}`);
   const attrTerms = new Map(); // taxonomy -> terms
   for (const a of attrs) attrTerms.set(`pa_${a.attribute_name}`, await termsOf(`pa_${a.attribute_name}`));
-  const allTerms = [...typeTerms, ...visTerms, ...cats, ...tags, ...classes, ...[...attrTerms.values()].flat()];
+  const allTerms = [...typeTerms, ...visTerms, ...cats, ...tags, ...classes, ...brandTerms, ...[...attrTerms.values()].flat()];
   const ttidToTerm = new Map(allTerms.map((t) => [t.ttid, t]));
   const typeSet = new Set(typeTerms.map((t) => t.ttid));
   const visTtids = new Set(visTerms.map((t) => t.ttid));
@@ -398,7 +422,7 @@ async function migrateProducts() {
   const attrTtids = new Map([...attrTerms].map(([tax, list]) => [tax, new Set(list.map((t) => t.ttid))]));
   const KNOWN = ['total_sales'];
   const { syncVariableParent } = require('../product');
-  const counts = { products: 0, variations: 0, images: 0, attributes: 0, catLinks: 0, tagLinks: 0, seen: 0 };
+  const counts = { products: 0, variations: 0, images: 0, attributes: 0, catLinks: 0, tagLinks: 0, brandLinks: 0, seen: 0 };
   progressAt = 0;
 
   for (const postType of ['product', 'product_variation']) {
@@ -422,6 +446,7 @@ async function migrateProducts() {
       const productAttrs = [];
       const catPairs = [];
       const tagPairs = [];
+      const brandPairs = [];
 
       for (const x of posts) {
         const m = meta.get(x.ID) || new Map();
@@ -460,6 +485,7 @@ async function migrateProducts() {
           name: x.post_title || '', slug: x.post_name || String(x.ID), status, featured: vis.has('featured'), catalogVisibility,
           description: isVar ? m.get('_variation_description') || '' : x.post_content || '', shortDescription: isVar ? '' : x.post_excerpt || '',
           sku: (m.get('_sku') || '').trim() || null,
+          globalUniqueId: (m.get('_global_unique_id') || '').trim() || null,
           price: num(m.get('_price')), regularPrice: num(m.get('_regular_price')), salePrice: num(m.get('_sale_price')),
           dateOnSaleFrom: ts(m.get('_sale_price_dates_from')), dateOnSaleTo: ts(m.get('_sale_price_dates_to')),
           virtual: yes(m.get('_virtual')), downloadable: yes(m.get('_downloadable')),
@@ -478,7 +504,7 @@ async function migrateProducts() {
           totalSales: parseInt(m.get('total_sales'), 10) || 0, purchaseNote: m.get('_purchase_note') || '', menuOrder: x.menu_order || 0,
           upsellIds: toArr(m.get('_upsell_ids')).map(Number), crossSellIds: toArr(m.get('_crosssell_ids')).map(Number), groupedProducts: toArr(m.get('_children')).map(Number),
           variationAttributes, defaultAttributes,
-          meta: publicMeta(m, KNOWN).filter((y) => !y.key.startsWith('attribute_')),
+          meta: (await contentMeta(m)).filter((y) => !y.key.startsWith('attribute_') && !KNOWN.includes(y.key)),
           createdAt: gmt(x.post_date_gmt) || new Date(), updatedAt: gmt(x.post_modified_gmt) || new Date(),
         });
         const imgIds = [parseInt(m.get('_thumbnail_id'), 10), ...csvIds(m.get('_product_image_gallery'))].filter((y) => y && mediaOk.has(y));
@@ -487,6 +513,7 @@ async function migrateProducts() {
           for (const t of objTerms) {
             if (catTtids.has(t.ttid)) catPairs.push([x.ID, t.id]);
             if (tagTtids.has(t.ttid)) tagPairs.push([x.ID, t.id]);
+            if (brandTtids.has(t.ttid)) brandPairs.push([x.ID, t.id]);
           }
           const pa = php(m.get('_product_attributes')) || {};
           Object.values(pa).forEach((a, i) => {
@@ -523,6 +550,7 @@ async function migrateProducts() {
       counts.attributes += await insertMany('productAttribute', productAttrs.filter((a) => !withAttrs.has(a.productId)));
       counts.catLinks += await linkMany('_ProductToCategory', 'Product', catPairs);
       counts.tagLinks += await linkMany('_ProductToTag', 'Product', tagPairs);
+      if (brandPairs.length) counts.brandLinks += await linkMany('_ProductToBrand', 'Product', brandPairs);
       // Variable parents store several _price rows in WC — recompute from variations
       if (isVar) for (const pid of new Set(products.map((y) => y.parentId))) await syncVariableParent(pid);
       counts.seen += posts.length;
@@ -530,7 +558,7 @@ async function migrateProducts() {
     }
   }
   log(`  ${counts.products} products, ${counts.variations} variations, ${counts.images} images, ${counts.attributes} attributes`);
-  log(`  ${counts.catLinks} category links, ${counts.tagLinks} tag links`);
+  log(`  ${counts.catLinks} category links, ${counts.tagLinks} tag links, ${counts.brandLinks} brand links`);
 
   // Reviews (comments on products), batched
   const statusOf = (a) => ({ 1: 'approved', 0: 'hold', spam: 'spam', trash: 'trash' }[a] || 'hold');

@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, fetchAll, wc } from '../../api';
+import { api, custom, fetchAll, wc } from '../../api';
 import { useNotice } from '../../hooks';
-import { decodeHtml, fromLocalInput, toDateInput } from '../../format';
+import { decodeHtml, fromLocalInput, toDateInput, toLocalInput } from '../../format';
+import { useContentTypes } from '../../contentTypes';
+import { FieldGroups, groupsFor } from '../../components/fields';
+import { AddonsPanel, BrandsBox, FacebookPanel, ReviewsBox, SeoBox } from './ProductExtras';
 import Editor from '../../components/Editor';
 import { ImageField, MediaPicker } from '../../components/media';
 import {
@@ -16,7 +19,10 @@ const EMPTY = {
   stock_quantity: null, stock_status: 'instock', backorders: 'no', low_stock_amount: null, sold_individually: false, weight: '',
   dimensions: { length: '', width: '', height: '' }, shipping_class: '', reviews_allowed: true, upsell_ids: [], cross_sell_ids: [],
   grouped_products: [], purchase_note: '', menu_order: 0, categories: [], tags: [], images: [], attributes: [], default_attributes: [], variations: [],
+  global_unique_id: '', brands: [], acf: {}, seo: {}, addons: [], exclude_global: false, facebook: { sync: true, visibility: true },
 };
+const STD_STATUSES = [['publish', 'Published'], ['draft', 'Draft'], ['pending', 'Pending Review'], ['private', 'Private']];
+const ucfirst = (x) => x.charAt(0).toUpperCase() + x.slice(1);
 
 // Searchable multi-product picker (upsells, cross-sells, grouped)
 function ProductPicker({ value, onChange, exclude }) {
@@ -83,6 +89,9 @@ export default function ProductEdit() {
   const [gallery, setGallery] = useState(false);
   const [newCat, setNewCat] = useState('');
   const [newAttr, setNewAttr] = useState('0');
+  const [brands, setBrands] = useState([]);
+  const [extraStatuses, setExtraStatuses] = useState([]);
+  const { registry } = useContentTypes();
 
   useEffect(() => {
     fetchAll(wc('products/categories')).then(setCats).catch(() => {});
@@ -90,6 +99,9 @@ export default function ProductEdit() {
     api.get(wc('taxes/classes')).then((c) => setTaxClasses(c.map((x) => ({ slug: x.slug === 'standard' ? '' : x.slug, name: x.name })))).catch(() => {});
     fetchAll(wc('products/shipping_classes')).then(setShipClasses).catch(() => {});
     api.get(wc('products/attributes')).then(setGlobalAttrs).catch(() => {});
+    fetchAll(wc('products/brands')).then(setBrands).catch(() => {});
+    // Custom post statuses in use on the site (e.g. redirect, protection)
+    api.get(custom('admin/plugins/products/status-counts')).then((c) => setExtraStatuses(Object.keys(c).filter((k) => !['all', 'trash', 'auto-draft', 'future', ...STD_STATUSES.map((x) => x[0])].includes(k)))).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -110,6 +122,9 @@ export default function ProductEdit() {
   const set = (patch) => setP((x) => ({ ...x, ...patch }));
   const setVar = (i, patch) => setVars((vs) => vs.map((v, idx) => (idx === i ? { ...v, ...patch, _dirty: true } : v)));
   const variationAttrs = useMemo(() => (p ? p.attributes.filter((a) => a.variation) : []), [p]);
+  // ACF "post_taxonomy" rules use "taxonomy:slug"
+  const termKeys = p ? p.categories.map((c) => `product_cat:${c.slug || (cats.find((x) => x.id === c.id) || {}).slug}`).join(',') : '';
+  const groups = useMemo(() => groupsFor(registry, { post_type: 'product', terms: termKeys ? termKeys.split(',') : [] }), [registry, termKeys]);
 
   if (!p) return <><Notice notice={notice} onClose={closeNotice} /><Loading /></>;
 
@@ -146,7 +161,14 @@ export default function ProductEdit() {
     const body = { ...p };
     ['id', 'permalink', 'date_created', 'date_created_gmt', 'date_modified', 'date_modified_gmt', 'price', 'price_html', 'on_sale', 'purchasable', 'total_sales',
       'backorders_allowed', 'backordered', 'shipping_required', 'shipping_taxable', 'shipping_class_id', 'average_rating', 'rating_count', 'related_ids', 'parent_id',
-      'variations', 'has_options', 'post_password', 'global_unique_id', '_links', 'date_on_sale_from_gmt', 'date_on_sale_to_gmt', 'meta_data'].forEach((k) => delete body[k]);
+      'variations', 'has_options', 'post_password', '_links', 'date_on_sale_from_gmt', 'date_on_sale_to_gmt', 'meta_data', 'out_of_stock_date', 'exclude_global',
+      'date_created', 'date_created_gmt'].forEach((k) => delete body[k]);
+    if (p._dateChanged && p.date_created) body.date_created = p.date_created;
+    delete body._dateChanged;
+    body.brands = (p.brands || []).map((b) => ({ id: b.id }));
+    body.exclude_global_addons = !!p.exclude_global;
+    const names = new Set(groups.flatMap((g) => (g.fields || []).map((f) => f.name)));
+    body.acf = Object.fromEntries(Object.entries(p.acf || {}).filter(([k]) => names.has(k)));
     body.categories = p.categories.map((c) => ({ id: c.id }));
     body.images = p.images.map((img) => ({ id: img.id }));
     body.date_on_sale_from = p.date_on_sale_from || null;
@@ -193,6 +215,19 @@ export default function ProductEdit() {
     image: v.image && v.image.id ? { id: v.image.id } : null,
   });
 
+  const copyToDraft = async () => {
+    try {
+      const copy = { ...payload(), name: `${p.name} (Copy)`, status: 'draft', sku: '', slug: '', global_unique_id: '' };
+      delete copy.date_created;
+      const created = await api.post(wc('products'), copy);
+      if (p.type === 'variable' && vars.length) {
+        await api.post(wc(`products/${created.id}/variations/batch`), { create: vars.map((v) => ({ ...varPayload(v), sku: '' })) });
+      }
+      navigate(`/products/${created.id}`);
+      showNotice('success', 'Draft copy created.');
+    } catch (e) { showNotice('error', e.message); }
+  };
+
   const trash = async () => {
     try { await api.del(wc(`products/${id}`)); navigate('/products'); } catch (e) { showNotice('error', e.message); }
   };
@@ -205,6 +240,8 @@ export default function ProductEdit() {
     ['attributes', 'Attributes', true],
     ['variations', 'Variations', p.type === 'variable'],
     ['advanced', 'Advanced', true],
+    ['facebook', 'Facebook', true],
+    ['addons', 'Add-ons', true],
   ].filter((t) => t[2]);
   const activeTab = tabs.some((t) => t[0] === tab) ? tab : tabs[0][0];
 
@@ -264,6 +301,10 @@ export default function ProductEdit() {
 
                 {activeTab === 'inventory' && <>
                   <Row label="SKU"><input type="text" value={p.sku} onChange={(e) => set({ sku: e.target.value })} /></Row>
+                  <Row label="GTIN, UPC, EAN, or ISBN" tip="Enter a barcode or any other identifier unique to this product. It can help you list this product on other channels or marketplaces.">
+                    <input type="text" value={p.global_unique_id || ''} onChange={(e) => set({ global_unique_id: e.target.value.replace(/[^0-9-]/g, '') })} />
+                  </Row>
+                  {p.out_of_stock_date && <Row label="Out of stock date"><span>{p.out_of_stock_date.replace('T', ' ')}</span></Row>}
                   {p.type !== 'external' && <Row label="Stock management"><label className="inline"><input type="checkbox" checked={p.manage_stock} onChange={(e) => set({ manage_stock: e.target.checked })} /> Track stock quantity for this product</label></Row>}
                   {p.manage_stock ? <>
                     <Row label="Quantity"><input type="number" value={p.stock_quantity ?? 0} onChange={(e) => set({ stock_quantity: Number(e.target.value) })} /></Row>
@@ -395,29 +436,61 @@ export default function ProductEdit() {
                   <Row label="Menu order"><input type="number" value={p.menu_order} onChange={(e) => set({ menu_order: Number(e.target.value) })} /></Row>
                   <Row label="Enable reviews"><input type="checkbox" checked={p.reviews_allowed} onChange={(e) => set({ reviews_allowed: e.target.checked })} /></Row>
                 </>}
+
+                {activeTab === 'facebook' && <FacebookPanel value={p.facebook} onChange={(facebook) => set({ facebook })} price={p.sale_price || p.regular_price} />}
+
+                {activeTab === 'addons' && <AddonsPanel addons={p.addons} excludeGlobal={p.exclude_global}
+                  onChange={(patch) => set({ ...(patch.addons ? { addons: patch.addons } : {}), ...('exclude_global_addons' in patch ? { exclude_global: patch.exclude_global_addons } : {}) })} />}
               </div>
             </div>
           </div>
 
           <Postbox title="Product short description"><Editor value={p.short_description} onChange={(short_description) => set({ short_description })} /></Postbox>
+          <FieldGroups groups={groups} values={p.acf || {}} onChange={(acf) => set({ acf })} registry={registry} />
+          <SeoBox seo={p.seo} onChange={(seo) => set({ seo })} name={decodeHtml(p.name)} slug={p.slug} onSlug={(slug) => set({ slug })} excerpt={p.short_description || p.description} permalink={p.permalink} />
+          {!isNew && <ReviewsBox productId={p.id} onError={(m) => showNotice('error', m)} />}
         </div>
 
         <div>
           <Postbox title="Publish">
+            {!isNew && <div className="flex mb" style={{ justifyContent: 'space-between' }}>
+              <button type="button" className="button" disabled={saving} onClick={() => save('draft')}>Save Draft</button>
+              <a className="button" href={p.permalink} target="_blank" rel="noreferrer">{p.status === 'publish' ? 'View' : 'Preview'}</a>
+            </div>}
             <div className="field"><label>Status</label>
-              <select value={p.status} onChange={(e) => set({ status: e.target.value })}><option value="publish">Published</option><option value="draft">Draft</option><option value="pending">Pending Review</option><option value="private">Private</option></select></div>
+              <select value={p.status} onChange={(e) => set({ status: e.target.value })}>
+                {STD_STATUSES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                {[...new Set([...extraStatuses, ...(STD_STATUSES.some((x) => x[0] === p.status) ? [] : [p.status])])].map((v) => <option key={v} value={v}>{ucfirst(v)}</option>)}
+              </select></div>
+            <div className="field"><label>{isNew ? 'Publish' : p.status === 'publish' ? 'Published on' : 'Created on'}</label>
+              <input type="datetime-local" value={toLocalInput(p.date_created)} onChange={(e) => set({ date_created: fromLocalInput(e.target.value), _dateChanged: true })} />
+              {isNew && !p.date_created && <p className="description">Leave empty to publish immediately.</p>}
+            </div>
             <div className="field"><label>Catalog visibility</label>
               <select value={p.catalog_visibility} onChange={(e) => set({ catalog_visibility: e.target.value })}><option value="visible">Shop and search results</option><option value="catalog">Shop only</option><option value="search">Search results only</option><option value="hidden">Hidden</option></select></div>
             <label className="inline mb"><input type="checkbox" checked={p.featured} onChange={(e) => set({ featured: e.target.checked })} /> This is a featured product</label>
             <div className="flex" style={{ justifyContent: 'space-between', marginTop: 10 }}>
-              {!isNew ? <button type="button" className="button-link-delete" onClick={() => confirmDelete('nothing — it will move to the Trash') && trash()}>Move to Trash</button> : <button type="button" className="button" disabled={saving} onClick={() => save('draft')}>Save Draft</button>}
+              {!isNew ? <span className="flex" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                <a href="#" onClick={(e) => { e.preventDefault(); copyToDraft(); }}>Copy to a new draft</a>
+                <button type="button" className="button-link-delete" onClick={() => confirmDelete('nothing — it will move to the Trash') && trash()}>Move to Trash</button>
+              </span> : <button type="button" className="button" disabled={saving} onClick={() => save('draft')}>Save Draft</button>}
               <button type="button" className="button button-primary" disabled={saving} onClick={() => save(isNew && p.status === 'draft' ? 'publish' : undefined)}>{saving ? 'Saving…' : isNew ? 'Publish' : 'Update'}</button>
             </div>
           </Postbox>
           <Postbox title="Product categories">
             <TermChecklist terms={cats} value={p.categories.map((c) => c.id)} onChange={(ids) => set({ categories: ids.map((cid) => cats.find((c) => c.id === cid) || { id: cid }) })} />
             <div className="flex mt"><input type="text" value={newCat} onChange={(e) => setNewCat(e.target.value)} placeholder="New category name" style={{ flex: 1 }} /><button type="button" className="button" onClick={addCategory}>Add</button></div>
+            {p.categories.length > 1 && (
+              <div className="field mt"><label>Primary category (Yoast)</label>
+                <select value={(p.seo || {}).primary_category || ''} onChange={(e) => set({ seo: { ...(p.seo || {}), primary_category: Number(e.target.value) || 0 } })}>
+                  <option value="">— Not set —</option>
+                  {p.categories.map((c) => <option key={c.id} value={c.id}>{decodeHtml(c.name || (cats.find((x) => x.id === c.id) || {}).name || String(c.id))}</option>)}
+                </select>
+              </div>
+            )}
           </Postbox>
+          <BrandsBox brands={brands} value={(p.brands || []).map((b) => b.id)} onChange={(ids) => set({ brands: ids.map((bid) => brands.find((b) => b.id === bid) || { id: bid }) })}
+            onCreated={(b) => setBrands((bs) => [...bs, b])} onError={(m) => showNotice('error', m)} />
           <Postbox title="Product tags"><TagInput value={p.tags} onChange={(tags) => set({ tags })} suggestions={allTags} /></Postbox>
           <Postbox title="Product image">
             <ImageField value={p.images[0]} label="Set product image" onChange={(img) => set({ images: img ? [img, ...p.images.slice(1)] : p.images.slice(1) })} />

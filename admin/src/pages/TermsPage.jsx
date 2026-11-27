@@ -11,6 +11,7 @@ import {
 
 const KINDS = {
   product_cat: { taxonomy: 'product_cat', title: 'Product categories', singular: 'category', path: wc('products/categories'), hierarchical: true, image: true, display: true, countLink: (t) => `/products?category=${t.id}` },
+  product_brand: { taxonomy: 'product_brand', title: 'Brands', singular: 'brand', path: wc('products/brands'), hierarchical: true, image: true, countLink: (t) => `/products?brand=${t.id}` },
   product_tag: { taxonomy: 'product_tag', title: 'Product tags', singular: 'tag', path: wc('products/tags') },
   shipping_class: { taxonomy: 'product_shipping_class', title: 'Shipping classes', singular: 'shipping class', path: wc('products/shipping_classes') },
   category: { taxonomy: 'category', title: 'Categories', singular: 'category', path: wp('categories'), hierarchical: true, wp: true },
@@ -64,6 +65,7 @@ export default function TermsPage({ kind, cfg: custom }) {
     if (v.slug) b.slug = v.slug;
     if (cfg.hierarchical) b.parent = v.parent || 0;
     if (groups.length) b.acf = v.acf || {};
+    if (cfg.image && !cfg.display) b.image = v.image && v.image.id ? { id: v.image.id } : null;
     if (cfg.display) { b.display = v.display; b.menu_order = v.menu_order; b.image = v.image && v.image.id ? { id: v.image.id } : null; }
     return b;
   };

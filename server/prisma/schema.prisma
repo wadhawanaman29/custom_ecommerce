@@ -89,6 +89,7 @@ model Media {
 
   productImages ProductImage[]
   categoryImages ProductCategory[]
+  brandImages    ProductBrand[]
 
   @@index([mimeType])
   @@index([createdAt])
@@ -113,6 +114,7 @@ model Product {
   description       String    @default("") @db.LongText
   shortDescription  String    @default("") @db.Text
   sku               String?   @db.VarChar(100)
+  globalUniqueId    String?   @db.VarChar(100) // GTIN, UPC, EAN or ISBN
 
   price             Decimal?  @db.Decimal(19, 4)
   regularPrice      Decimal?  @db.Decimal(19, 4)
@@ -134,6 +136,7 @@ model Product {
   manageStock       Boolean   @default(false)
   stockQuantity     Int?
   stockStatus       String    @default("instock") @db.VarChar(20)
+  outOfStockAt      DateTime? // set when the product goes out of stock, cleared when back
   backorders        String    @default("no") @db.VarChar(10)
   lowStockAmount    Int?
   soldIndividually  Boolean   @default(false)
@@ -165,6 +168,7 @@ model Product {
 
   categories        ProductCategory[] @relation("ProductToCategory")
   tags              ProductTag[]      @relation("ProductToTag")
+  brands            ProductBrand[]    @relation("ProductToBrand")
   images            ProductImage[]
   attributes        ProductAttribute[]
   reviews           ProductReview[]
@@ -179,6 +183,8 @@ model Product {
   @@index([totalSales])
   @@index([createdAt])
   @@index([salePrice])
+  @@index([globalUniqueId])
+  @@index([outOfStockAt])
   @@fulltext([name, sku])
 }
 
@@ -208,6 +214,22 @@ model ProductCategory {
   menuOrder   Int      @default(0)
   meta        Json?    // term meta / ACF fields ("acf:<name>")
   products    Product[] @relation("ProductToCategory")
+}
+
+// WooCommerce Brands (taxonomy product_brand)
+model ProductBrand {
+  id          Int      @id @default(autoincrement())
+  name        String   @db.VarChar(200)
+  slug        String   @unique @db.VarChar(200)
+  description String   @default("") @db.Text
+  parentId    Int?
+  parent      ProductBrand?  @relation("BrandTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children    ProductBrand[] @relation("BrandTree")
+  imageId     Int?
+  image       Media?   @relation(fields: [imageId], references: [id], onDelete: SetNull)
+  menuOrder   Int      @default(0)
+  meta        Json?
+  products    Product[] @relation("ProductToBrand")
 }
 
 model ProductTag {

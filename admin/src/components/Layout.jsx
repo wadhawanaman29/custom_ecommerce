@@ -17,7 +17,7 @@ const MENU = [
   ] },
   { label: 'Products', icon: '▦', base: '/products', perm: 'shop', children: [
     { to: '/products', label: 'All Products', end: true }, { to: '/products/new', label: 'Add New' },
-    { to: '/products/categories', label: 'Categories' }, { to: '/products/tags', label: 'Tags' },
+    { to: '/products/categories', label: 'Categories' }, { to: '/products/tags', label: 'Tags' }, { to: '/products/brands', label: 'Brands' },
     { to: '/products/attributes', label: 'Attributes' }, { to: '/products/shipping-classes', label: 'Shipping classes' },
     { to: '/products/reviews', label: 'Reviews' },
   ] },

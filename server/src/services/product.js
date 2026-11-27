@@ -11,7 +11,9 @@ const intOrNull = (v) => (v === '' || v === null || v === undefined ? null : par
 const idArr = (v) => (Array.isArray(v) ? v.map((x) => parseInt(typeof x === 'object' ? x.id : x, 10)).filter(Boolean) : []);
 
 const PRODUCT_TYPES = ['simple', 'variable', 'grouped', 'external'];
-const STATUSES = ['draft', 'pending', 'private', 'publish', 'future', 'trash'];
+// WordPress statuses + custom ones registered on the site (e.g. "redirect" for discontinued products)
+const STATUS_RE = /^[a-z0-9_-]{1,20}$/;
+const extras = require('../lib/product-extras');
 
 // Scalar fields shared by products and variations
 async function scalarData(body, existing, s) {
@@ -22,8 +24,8 @@ async function scalarData(body, existing, s) {
   set('description', 'description', String);
   set('short_description', 'shortDescription', String);
   set('status', 'status', (v) => {
-    if (!STATUSES.includes(v)) throw badRequest('rest_invalid_param', 'Invalid parameter(s): status');
-    return v;
+    if (!STATUS_RE.test(String(v))) throw badRequest('rest_invalid_param', 'Invalid parameter(s): status');
+    return String(v);
   });
   set('featured', 'featured', bool);
   set('catalog_visibility', 'catalogVisibility', String);
@@ -74,6 +76,17 @@ async function scalarData(body, existing, s) {
     d.sku = sku || null;
   }
 
+  // GTIN, UPC, EAN or ISBN (WooCommerce 9.2+), unique like WooCommerce enforces
+  if (has(body, 'global_unique_id')) {
+    const gtin = String(body.global_unique_id || '').trim();
+    if (gtin) {
+      if (!/^[0-9-]+$/.test(gtin)) throw badRequest('product_invalid_global_unique_id', 'Invalid GTIN, UPC, EAN or ISBN.');
+      const dupe = await prisma.product.findFirst({ where: { globalUniqueId: gtin, NOT: existing ? { id: existing.id } : undefined }, select: { id: true } });
+      if (dupe) throw badRequest('product_invalid_global_unique_id', 'Invalid or duplicated GTIN, UPC, EAN or ISBN.', { resource_id: dupe.id });
+    }
+    d.globalUniqueId = gtin || null;
+  }
+
   if (has(body, 'shipping_class')) {
     if (!body.shipping_class) d.shippingClassId = null;
     else {
@@ -83,6 +96,15 @@ async function scalarData(body, existing, s) {
   }
 
   if (has(body, 'meta_data')) d.meta = metaMerge(existing?.meta, body.meta_data);
+  // Structured plugin data kept in meta (ACF, Yoast SEO, Product Add-ons, Meta for WooCommerce)
+  if (['acf', 'seo', 'addons', 'exclude_global_addons', 'facebook'].some((k) => has(body, k))) {
+    let meta = d.meta || existing?.meta || [];
+    if (has(body, 'acf')) meta = extras.acfMerge(meta, body.acf);
+    if (has(body, 'seo')) meta = extras.seoMerge(meta, body.seo, 'product');
+    if (has(body, 'addons') || has(body, 'exclude_global_addons')) meta = extras.addonsMerge(meta, body);
+    if (has(body, 'facebook')) meta = extras.facebookMerge(meta, body.facebook);
+    d.meta = meta;
+  }
 
   // ── Derived: active price ──
   const merged = { ...(existing || {}), ...d };
@@ -99,6 +121,11 @@ async function scalarData(body, existing, s) {
     else d.stockStatus = 'outofstock';
   }
   if (merged.manageStock === false && has(d, 'manageStock')) d.stockQuantity = null;
+
+  // "Out of stock date": stamped when a product becomes out of stock, cleared when it's back
+  const newStatus = d.stockStatus || merged.stockStatus;
+  if (newStatus === 'outofstock' && (!existing || existing.stockStatus !== 'outofstock')) d.outOfStockAt = new Date();
+  else if (newStatus && newStatus !== 'outofstock' && existing && existing.outOfStockAt) d.outOfStockAt = null;
 
   return d;
 }
@@ -202,6 +229,7 @@ async function createOrUpdateProduct(body, s, existing = null) {
     const relationData = {};
     if (has(body, 'categories')) relationData.categories = { set: termConnect(body.categories) };
     if (has(body, 'tags')) relationData.tags = { set: termConnect(body.tags) };
+    if (has(body, 'brands')) relationData.brands = { set: termConnect(body.brands) };
 
     let product;
     if (existing) {
@@ -209,6 +237,7 @@ async function createOrUpdateProduct(body, s, existing = null) {
     } else {
       if (relationData.categories) relationData.categories = { connect: relationData.categories.set };
       if (relationData.tags) relationData.tags = { connect: relationData.tags.set };
+      if (relationData.brands) relationData.brands = { connect: relationData.brands.set };
       product = await tx.product.create({ data: { ...data, ...relationData } });
     }
     if (mediaIds) await setImages(tx, product.id, mediaIds);

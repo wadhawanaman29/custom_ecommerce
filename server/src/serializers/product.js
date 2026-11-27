@@ -6,10 +6,13 @@ const { priceHtml } = require('../lib/currency');
 const { slugify } = require('../lib/slug');
 
 const API = `${config.siteUrl}/wp-json/wc/v3`;
+const extras = require('../lib/product-extras');
+const publicMeta = (meta) => metaOut((meta || []).filter((m) => !extras.isStructured(m.key)));
 
 const productInclude = {
   categories: { select: { id: true, name: true, slug: true } },
   tags: { select: { id: true, name: true, slug: true } },
+  brands: { select: { id: true, name: true, slug: true } },
   images: { include: { media: true }, orderBy: { position: 'asc' } },
   attributes: { orderBy: { position: 'asc' } },
   shippingClass: { select: { id: true, slug: true } },
@@ -171,6 +174,7 @@ function serializeProduct(p, s, extra = {}) {
     purchase_note: p.purchaseNote,
     categories: (p.categories || []).map((c) => ({ id: c.id, name: c.name, slug: c.slug })),
     tags: (p.tags || []).map((t) => ({ id: t.id, name: t.name, slug: t.slug })),
+    brands: (p.brands || []).map((b) => ({ id: b.id, name: b.name, slug: b.slug })),
     images: (p.images || []).map((i) => imageOut(i.media, s)).filter(Boolean),
     attributes: (p.attributes || []).map((a) => ({
       id: a.attributeId,
@@ -185,10 +189,15 @@ function serializeProduct(p, s, extra = {}) {
     variations: (p.variations || []).map((v) => v.id),
     grouped_products: ids(p.groupedProducts),
     menu_order: p.menuOrder,
-    meta_data: metaOut((p.meta || []).filter((m) => m.key !== '_storewide_sale')),
+    meta_data: publicMeta(p.meta),
+    acf: extras.acfOut(p.meta),
+    seo: extras.seoOut(p.meta, 'product'),
+    ...extras.addonsOut(p.meta),
+    facebook: extras.facebookOut(p.meta),
+    out_of_stock_date: p.outOfStockAt ? wpDate(p.outOfStockAt, s.gmtOffset) : null,
     has_options: isVariable || p.type === 'grouped' || (p.attributes || []).some((a) => a.variation),
     post_password: '',
-    global_unique_id: '',
+    global_unique_id: p.globalUniqueId || '',
     _links: {
       self: [{ href: `${API}/products/${p.id}` }],
       collection: [{ href: `${API}/products` }],
@@ -208,7 +217,7 @@ function serializeVariation(v, s) {
     description: v.description,
     permalink: `${config.frontendUrl}/product/${parentSlug}/?${(v.variationAttributes || []).map((a) => `attribute_${a.id ? `pa_${slugify(a.name)}` : slugify(a.name)}=${encodeURIComponent(a.option)}`).join('&')}`,
     sku: v.sku || '',
-    global_unique_id: '',
+    global_unique_id: v.globalUniqueId || '',
     price: price(v.price),
     regular_price: price(v.regularPrice),
     sale_price: v.salePrice !== null ? price(v.salePrice) : '',
@@ -231,7 +240,8 @@ function serializeVariation(v, s) {
     image: img,
     attributes: Array.isArray(v.variationAttributes) ? v.variationAttributes.map((a) => ({ id: a.id || 0, name: a.name, slug: a.id ? `pa_${slugify(a.name)}` : slugify(a.name), option: a.option })) : [],
     menu_order: v.menuOrder,
-    meta_data: metaOut((v.meta || []).filter((m) => m.key !== '_storewide_sale')),
+    meta_data: publicMeta(v.meta),
+    out_of_stock_date: v.outOfStockAt ? wpDate(v.outOfStockAt, s.gmtOffset) : null,
     name: v.name,
     parent_id: v.parentId,
     shipping_required: shippingRequired,

@@ -236,4 +236,82 @@ router.get('/export/orders', manage, ah(async (req, res) => {
   res.end();
 }));
 
+// ── Products list helpers: status tab counts (incl. custom statuses like "redirect") + CSV export ──
+router.get('/products/status-counts', can('edit_products'), ah(async (req, res) => {
+  const rows = await prisma.product.groupBy({ by: ['status'], where: { type: { not: 'variation' } }, _count: { _all: true } });
+  const counts = Object.fromEntries(rows.map((r) => [r.status, r._count._all]));
+  const all = rows.filter((r) => !['trash', 'auto-draft'].includes(r.status)).reduce((n, r) => n + r._count._all, 0);
+  res.json({ all, ...counts });
+}));
+
+const metaVal = (p, key) => { const m = (Array.isArray(p.meta) ? p.meta : []).find((x) => x.key === key); return m ? m.value : ''; };
+const PRODUCT_COLUMNS = {
+  id: ['ID', (p) => p.id],
+  type: ['Type', (p) => p.type],
+  sku: ['SKU', (p) => p.sku || ''],
+  gtin: ['GTIN, UPC, EAN, or ISBN', (p) => p.globalUniqueId || ''],
+  name: ['Name', (p) => p.name],
+  status: ['Status', (p) => p.status],
+  featured: ['Is featured?', (p) => (p.featured ? 1 : 0)],
+  visibility: ['Visibility in catalog', (p) => p.catalogVisibility],
+  short_description: ['Short description', (p) => p.shortDescription],
+  description: ['Description', (p) => p.description],
+  sale_from: ['Date sale price starts', (p) => (p.dateOnSaleFrom ? p.dateOnSaleFrom.toISOString().slice(0, 10) : '')],
+  sale_to: ['Date sale price ends', (p) => (p.dateOnSaleTo ? p.dateOnSaleTo.toISOString().slice(0, 10) : '')],
+  tax_status: ['Tax status', (p) => p.taxStatus],
+  tax_class: ['Tax class', (p) => p.taxClass],
+  in_stock: ['In stock?', (p) => (p.stockStatus === 'instock' ? 1 : p.stockStatus === 'onbackorder' ? 'backorder' : 0)],
+  stock: ['Stock', (p) => (p.manageStock ? p.stockQuantity ?? '' : '')],
+  low_stock: ['Low stock amount', (p) => p.lowStockAmount ?? ''],
+  out_of_stock_date: ['Out of stock date', (p) => (p.outOfStockAt ? p.outOfStockAt.toISOString().slice(0, 10) : '')],
+  backorders: ['Backorders allowed?', (p) => (p.backorders === 'yes' ? 1 : p.backorders === 'notify' ? 'notify' : 0)],
+  sold_individually: ['Sold individually?', (p) => (p.soldIndividually ? 1 : 0)],
+  weight: ['Weight', (p) => p.weight], length: ['Length', (p) => p.length], width: ['Width', (p) => p.width], height: ['Height', (p) => p.height],
+  reviews_allowed: ['Allow customer reviews?', (p) => (p.reviewsAllowed ? 1 : 0)],
+  purchase_note: ['Purchase note', (p) => p.purchaseNote],
+  sale_price: ['Sale price', (p) => (p.salePrice === null ? '' : Number(p.salePrice))],
+  regular_price: ['Regular price', (p) => (p.regularPrice === null ? '' : Number(p.regularPrice))],
+  categories: ['Categories', (p) => p.categories.map((c) => c.name).join(', ')],
+  tags: ['Tags', (p) => p.tags.map((t) => t.name).join(', ')],
+  brands: ['Brands', (p) => p.brands.map((b) => b.name).join(', ')],
+  shipping_class: ['Shipping class', (p) => (p.shippingClass ? p.shippingClass.name : '')],
+  images: ['Images', (p) => p.images.map((i) => (i.media ? require('../lib/format').mediaUrl(i.media.path) : '')).filter(Boolean).join(', ')],
+  parent: ['Parent', (p) => (p.parentId ? `id:${p.parentId}` : '')],
+  position: ['Position', (p) => p.menuOrder],
+  access_level: ['Access level', (p) => { const v = metaVal(p, 'acf:product_access_level'); return Array.isArray(v) ? v.join(', ') : v || ''; }],
+  fb_sync: ['Synced to Meta catalog', (p) => (metaVal(p, '_wc_facebook_sync_enabled') === 'no' ? 'no' : 'yes')],
+  seo_title: ['SEO title', (p) => metaVal(p, '_yoast_wpseo_title')],
+  seo_description: ['Meta description', (p) => metaVal(p, '_yoast_wpseo_metadesc')],
+};
+router.get('/export/product-columns', can('edit_products'), (req, res) => res.json(Object.entries(PRODUCT_COLUMNS).map(([key, [label]]) => ({ key, label }))));
+router.get('/export/products', can('edit_products'), ah(async (req, res) => {
+  const q = req.query;
+  const cols = (q.columns ? String(q.columns).split(',') : Object.keys(PRODUCT_COLUMNS)).filter((c) => PRODUCT_COLUMNS[c]);
+  if (!cols.length) throw badRequest('no_columns', 'Choose at least one column.');
+  const where = { status: { not: 'trash' } };
+  if (q.status) where.status = { in: String(q.status).split(',') };
+  if (q.type) where.type = { in: String(q.type).split(',') };
+  else if (q.variations !== '1') where.type = { not: 'variation' };
+  if (q.category) where.categories = { some: { id: { in: String(q.category).split(',').map(Number).filter(Boolean) } } };
+  const esc = (v) => { const s = v === null || v === undefined ? '' : String(v); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="wc-product-export-${new Date().toISOString().slice(0, 10)}.csv"`);
+  res.write(`﻿${cols.map((c) => esc(PRODUCT_COLUMNS[c][0])).join(',')}\n`);
+  let lastId = 0;
+  for (;;) {
+    const rows = await prisma.product.findMany({
+      where: { ...where, id: { gt: lastId } }, orderBy: { id: 'asc' }, take: 500,
+      include: {
+        categories: { select: { name: true } }, tags: { select: { name: true } }, brands: { select: { name: true } },
+        shippingClass: { select: { name: true } }, images: { orderBy: { position: 'asc' }, include: { media: { select: { path: true } } } },
+      },
+    });
+    if (!rows.length) break;
+    lastId = rows[rows.length - 1].id;
+    const chunk = rows.map((p) => `${cols.map((c) => esc(PRODUCT_COLUMNS[c][1](p))).join(',')}\n`).join('');
+    if (!res.write(chunk)) await new Promise((r) => res.once('drain', r));
+  }
+  res.end();
+}));
+
 module.exports = router;

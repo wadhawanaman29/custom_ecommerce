@@ -1,6 +1,7 @@
 // /wp-json/wc/v3/products (+ /variations, /batch)
 const express = require('express');
 const prisma = require('../../db');
+const { Prisma } = require('@prisma/client');
 const { ah, intParam, ApiError } = require('../../lib/http');
 const { parseCollection, setPaginationHeaders, idList, strList } = require('../../lib/pagination');
 const { parseWpDate, bool } = require('../../lib/format');
@@ -88,12 +89,28 @@ async function buildProductWhere(req, s) {
   if (q.parent_exclude) where.NOT = [...(where.NOT || []), { parentId: { in: idList(q.parent_exclude) } }];
   if (q.category) where.categories = { some: { id: { in: await categoryWithDescendants(idList(q.category) || []) } } };
   if (q.tag) where.tags = { some: { id: { in: idList(q.tag) || [] } } };
+  if (q.brand) where.brands = { some: { id: { in: idList(q.brand) || [] } } };
+  if (q.global_unique_id) where.globalUniqueId = String(q.global_unique_id);
+  // ACF product_access_level (stored as meta 'acf:product_access_level'); 'none' = not set or none
+  if (q.access_level) {
+    const key = 'acf:product_access_level';
+    const lvl = String(q.access_level);
+    const cond = lvl === 'none'
+      ? { OR: [{ meta: { equals: Prisma.DbNull } }, { NOT: { meta: { array_contains: [{ key }] } } }, { meta: { array_contains: [{ key, value: 'none' }] } }] }
+      : { meta: { array_contains: [{ key, value: lvl }] } };
+    where.AND = [...(where.AND || []), cond];
+  }
+  // Meta for WooCommerce: synced unless _wc_facebook_sync_enabled = 'no'
+  if (q.fb_sync === 'synced' || q.fb_sync === 'not_synced') {
+    const off = { meta: { array_contains: [{ key: '_wc_facebook_sync_enabled', value: 'no' }] } };
+    where.AND = [...(where.AND || []), q.fb_sync === 'not_synced' ? off : { OR: [{ meta: { equals: Prisma.DbNull } }, { NOT: off }] }];
+  }
   if (q.shipping_class) where.shippingClassId = { in: idList(q.shipping_class) };
   if (!staff && s.hideOutOfStock && !q.stock_status) where.stockStatus = { not: 'outofstock' };
   if (q.search) {
     const term = String(q.search);
     // FULLTEXT on name/SKU + SKU prefix (index) — no LIKE '%term%' table scans
-    const sw = await searchWhere('Product', ['name', 'sku'], term, ['sku']);
+    const sw = await searchWhere('Product', ['name', 'sku'], term, ['sku', 'globalUniqueId']);
     if (sw) where.AND = [...(where.AND || []), sw];
   }
   if (q.attribute) {
@@ -105,9 +122,8 @@ async function buildProductWhere(req, s) {
       const terms = await prisma.attributeTerm.findMany({ where: { id: { in: idList(q.attribute_term) || [] } } });
       if (!terms.length) return null;
       // MySQL JSON array_contains matches products having ANY of the term names
-      return { ...where, AND: [...(where.AND || []), { OR: terms.map((t) => ({ attributes: { some: { ...attrWhere, options: { array_contains: [t.name] } } } })) }] };
-    }
-    where.attributes = { some: attrWhere };
+      where.AND = [...(where.AND || []), { OR: terms.map((t) => ({ attributes: { some: { ...attrWhere, options: { array_contains: [t.name] } } } })) }];
+    } else where.attributes = { some: attrWhere };
   }
   if (q.on_sale !== undefined) {
     const saleIds = await onSaleProductIds();

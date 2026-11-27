@@ -141,6 +141,7 @@ function postOut(p, s, req, extra = {}) {
     // Custom taxonomies: { <rest_base>: [termIds] } like WordPress
     ...(cfg ? Object.fromEntries(cfg.taxonomies.map((tx) => [tx.rest_base, (p.terms || []).filter((t) => t.taxonomy === tx.name).map((t) => t.id)])) : {}),
     acf: acfObject(p.meta),
+    seo: require('../../lib/product-extras').seoOut(p.meta, 'post'), // Yoast SEO fields (_yoast_wpseo_*)
     _links: {
       self: [{ href: `${WP}/${base}/${p.id}` }],
       collection: [{ href: `${WP}/${base}` }],
@@ -329,6 +330,7 @@ function postRouter(type, cfg = null) {
       for (const [key, value] of Object.entries(body.meta)) if (value !== null) list.push({ id: ++id, key, value });
       d.meta = list;
     }
+    if (has(body, 'seo')) d.meta = require('../../lib/product-extras').seoMerge(d.meta || (Array.isArray(existing?.meta) ? existing.meta : []), body.seo, 'post');
     // ACF values: { acf: { field_name: value } } → meta "acf:field_name" (null removes)
     if (has(body, 'acf') && body.acf && typeof body.acf === 'object') {
       const list = (d.meta || (Array.isArray(existing?.meta) ? existing.meta : [])).filter((m) => !(m.key && m.key.startsWith('acf:') && has(body.acf, m.key.slice(4))));

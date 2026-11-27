@@ -166,6 +166,36 @@ const categories = termRouter({
   },
 });
 
+// ── Brands (WooCommerce Brands, taxonomy product_brand) ──
+const brands = termRouter({
+  model: 'productBrand',
+  idCode: 'woocommerce_rest_term_invalid',
+  hasParent: true,
+  hasMenuOrder: true,
+  include: () => ({ ...countInclude(), image: true }),
+  serialize: (t, s) => ({
+    id: t.id,
+    name: t.name,
+    slug: t.slug,
+    parent: t.parentId || 0,
+    description: t.description,
+    display: 'default',
+    image: t.image ? imageOut(t.image, s) : null,
+    menu_order: t.menuOrder,
+    count: t._count ? t._count.products : 0,
+    acf: Array.isArray(t.meta) ? Object.fromEntries(t.meta.filter((m) => m.key && m.key.startsWith('acf:')).map((m) => [m.key.slice(4), m.value])) : {},
+    _links: { self: [{ href: `${API}/products/brands/${t.id}` }], collection: [{ href: `${API}/products/brands` }] },
+  }),
+  writable: async (body, existing) => {
+    const d = {};
+    if (has(body, 'parent')) d.parentId = parseInt(body.parent, 10) || null;
+    if (has(body, 'menu_order')) d.menuOrder = parseInt(body.menu_order, 10) || 0;
+    if (has(body, 'image')) d.imageId = body.image && body.image.id ? parseInt(body.image.id, 10) : null;
+    if (has(body, 'acf') && body.acf && typeof body.acf === 'object') d.meta = require('../../lib/product-extras').acfMerge(existing?.meta, body.acf);
+    return d;
+  },
+});
+
 // ── Tags ──
 const simpleSerialize = (base) => (t) => ({
   id: t.id, name: t.name, slug: t.slug, description: t.description, count: t._count ? t._count.products : 0,
@@ -437,4 +467,4 @@ reviews.delete('/:id(\\d+)', can('moderate_comments'), ah(async (req, res) => {
   res.json(reviewOut(t, s));
 }));
 
-module.exports = { categories, tags, shippingClasses, attributes, reviews };
+module.exports = { categories, brands, tags, shippingClasses, attributes, reviews };

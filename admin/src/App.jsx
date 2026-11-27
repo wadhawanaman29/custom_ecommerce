@@ -73,6 +73,7 @@ export default function App() {
         <Route path="products/:id" element={<ProductEdit />} />
         <Route path="products/categories" element={<TermsPage kind="product_cat" />} />
         <Route path="products/tags" element={<TermsPage kind="product_tag" />} />
+        <Route path="products/brands" element={<TermsPage kind="product_brand" />} />
         <Route path="products/shipping-classes" element={<TermsPage kind="shipping_class" />} />
         <Route path="products/attributes" element={<Attributes />} />
         <Route path="products/attributes/:id" element={<AttributeTerms />} />
